@@ -61,8 +61,16 @@ def summarize_sections(aggregated_sections):
     Build the prompt from the aggregated sections and call the ChatOpenAI model to obtain a summary.
     """
     prompt = (
-        "I have aggregated information from multiple PowerPoint files. "
-        "Please summarize the following information separately by section but make sure to generate in french.\n\n"
+        "Here is aggregated information from multiple PowerPoint files. Your task is to create a structured summary in French, dividing the content by each relevant section. For each section, provide a concise overview that captures the key points and main ideas. If you encounter sections with minimal or irrelevant updates, you may briefly mention them or skip them entirely."
+        "Key Requirements:"
+        "   - Language: The summary must be written entirely in French."
+        "   - Structure: Separate the content by section, ensuring each section has a clear heading or title."
+        "   - Conciseness: Deliver a concise yet informative summary, focusing on essential points."
+        "   - Relevancy: If any section does not contain substantial information (e.g., “no big updates”), you may either omit it or note it briefly."
+        "   - Accuracy: Maintain the integrity of the original information; do not add unsupported details."
+        "Output Format:"
+        "   - One consolidated summary in French, broken down by each section from the source material."
+        "   - Use headings or bullet points to keep the sections clear and organized."
     )
     for section, text in aggregated_sections.items():
         prompt += f"=== {section} ===\n{text}\n\n"
@@ -81,9 +89,8 @@ def aggregate_and_summarize(pptx_folder):
         "Evénements de la semaine à venir"
     ]
     aggregated_sections = aggregate_pptx_files(pptx_folder, title_pattern, expected_titles)
-    summary = summarize_sections(aggregated_sections)
-    print("Summary:")
-    print(remove_tags_no_keep(summary, "<think>", "</think>"))
+    summary = remove_tags_no_keep(summarize_sections(aggregated_sections), "<think>", "</think>")
+    return summary
 
 if __name__ == "__main__":
     folder = "pptx_folder"  # Update with your actual folder path
