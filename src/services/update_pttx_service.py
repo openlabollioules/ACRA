@@ -35,4 +35,5 @@ def update_table_cell(pptx_path, slide_index, table_shape_index, row, col, new_t
     # Save the updated presentation
     prs.save(output_path)
     print(f"Updated cell ({row}, {col}) with text: '{new_text}' and saved to {output_path}")
+    return output_path
 

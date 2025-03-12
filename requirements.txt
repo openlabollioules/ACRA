@@ -1,1 +1,4 @@
-python-pttx
+python-pptx
+langchain-openai
+fastapi
+python-multipart
