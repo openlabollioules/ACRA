@@ -11,17 +11,19 @@ class Pipeline:
 
     class Valves(BaseModel): 
         LLAMAINDEX_OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
-        LLAMAINDEX_MODEL_NAME: str = "gemma3:12b"
+        LLAMAINDEX_MODEL_NAME: str = "phi4:latest"
 
     def __init__(self):
 
         self.valves = self.Valves(
             **{
                 "LLAMAINDEX_OLLAMA_BASE_URL": os.getenv("LLAMAINDEX_OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
-                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "gemma3:12b"),
+                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "phi4:latest"),
             }
         )
         
+        self.last_response = None
+
         self.model = OllamaLLM(model=self.valves.LLAMAINDEX_MODEL_NAME, base_url=self.valves.LLAMAINDEX_OLLAMA_BASE_URL)
         
         self.api_url = "http://host.docker.internal:5050"
@@ -43,42 +45,63 @@ class Pipeline:
     def analyze_slide_structure(self, filename):
         return self.fetch(f"get_slide_structure/{filename}")
     
-    def format_slide_data(self, slide_data: dict) -> str:
-        filename = slide_data.get("filename", "Unknown File")
-        total_slides = slide_data.get("slide data", {}).get("total_slides", 0)
-        slides = slide_data.get("slide data", {}).get("slides", [])
+    def format_all_slide_data(self, presentations: dict) -> str:
+        """
+        Formate les données de plusieurs présentations PPTX en une seule chaîne de texte structurée.
 
-        result = f"📂 **Présentation : {filename}**\n"
-        result += f"📊 **Nombre total de diapositives : {total_slides}**\n\n"
+        Args:
+            presentations (dict): Dictionnaire contenant plusieurs fichiers et leurs données.
 
-        for slide in slides:
-            slide_number = slide.get("slide_number", "N/A")
-            result += f"📄 **Diapositive {slide_number} :**\n"
+        Returns:
+            str: Une chaîne de texte structurée listant les informations de chaque fichier PPTX.
+        """
+        result = ""
 
-            # Formater les shapes et graphiques
-            for shape in slide.get("shapes", []):
-                shape_type = shape.get("type", "Shape")
-                if shape_type == "Shape" and "text" in shape:
-                    result += f"🔹 **Texte :** {shape['text']}\n"
+        if not presentations.get("presentations"):
+            return "❌ Aucun fichier PPTX fourni."
 
-                elif shape_type == "GraphicFrame" and "table" in shape:
-                    result += "📊 **Tableau :**\n"
-                    for row in shape["table"]:
-                        result += f"   - {' | '.join(row)}\n"
+        for presentation in presentations["presentations"]:
+            filename = presentation.get("filename", "Unknown File")
+            total_slides = presentation.get("slide data", {}).get("total_slides", 0)
+            slides = presentation.get("slide data", {}).get("slides", [])
+
+            result += f"\n📂 **Présentation : {filename}**\n"
+            result += f"📊 **Nombre total de diapositives : {total_slides}**\n\n"
+
+            for slide in slides:
+                slide_number = slide.get("slide_number", "N/A")
+                result += f"📄 **Diapositive {slide_number} :**\n"
+
+                for shape in slide.get("shapes", []):
+                    shape_type = shape.get("type", "Shape")
+                    
+                    # Si c'est du texte classique
+                    if shape_type == "Shape" and "text" in shape:
+                        result += f"🔹 **Texte :** {shape['text']}\n"
+
+                    # Si c'est un tableau
+                    elif shape_type == "GraphicFrame" and "table" in shape:
+                        result += "📊 **Tableau :**\n"
+                        for row in shape["table"]:
+                            row_text = " | ".join(row).strip()
+                            if row_text:  # Évite d'afficher des lignes vides
+                                result += f"   - {row_text}\n"
+                
+                result += "\n"  # Ajoute un espace entre les diapositives
             
-            result += "\n"
+            result += "-" * 50 + "\n"  # Séparateur entre fichiers
 
         return result.strip()
 
 
+    def delete_all_files(self):
+        url = f"{self.api_url}/delete_all_pptx_files"
+        response = requests.delete(url) 
+        print(response)
+
+        return response
     
 
-    async def on_startup(self):
-        pass
-
-    async def on_shutdown(self):
-        pass
-    
 
     # async def inlet(self, body: dict, user: dict) -> dict:
     #     """Modifies form data before the OpenAI API request."""
@@ -123,11 +146,13 @@ class Pipeline:
             self, body: dict, user_message: str, model_id: str, messages: List[dict]
         ) -> Union[str, Generator, Iterator]:
     
-        message = user_message + " respond in English only"
+        message = user_message
 
-        # for files in self.file_path_list:
-        # structure = self.fetch(f"get_slide_structure/CRA_SERVICE_CYBER.pptx")
-        
+        last_response = self.last_response
+
+        print(f"📥 Message actuel : {user_message}")
+        print(f"🔄 Dernière réponse générée (N-1) : {last_response}")
+
         parts = user_message.strip().split(" ", 1)  # ["commande", "argument"]
         command = parts[0].lower()
         # argument = parts[1] if len(parts) > 1 else None
@@ -135,20 +160,16 @@ class Pipeline:
         if command == "/summarize" :
             # response = self.summarize_presentation()
             response ="YESSSS JE SUMMARIZE "
-            print('summarize')
         elif command == "/structure":
             print('structure')
-            response = self.fetch(f"get_slide_structure/CRA_SERVICE_CYBER.pptx")
-            
-            response = self.format_slide_data(response)
+            response = self.fetch(f"get_slide_structure/")
+            response = self.format_all_slide_data(response)
         else:
-            response = {"error Commande invalide. Essayez /summarize <filename> ou /structure <filename>"}
+            if last_response : 
+                message += f"\n\n *Last response generated :* {last_response}"
+            response = self.model.invoke(message)
 
-        # print("Processed message:", message)
-
-        # response = self.model.invoke(message)
-        # response = response +f"\n {structure}"
-
+        self.last_response = response
         return response
     
 pipeline = Pipeline()

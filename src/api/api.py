@@ -58,27 +58,41 @@ async def summarize_ppt(file: UploadFile = File(...)):
 
 # Testing the function with : 
 #  curl -X GET "http://localhost:5050/get_slide_structure/CRA_SERVICE_CYBER.pptx"
-@app.get("/get_slide_structure/{filename}")
-async def get_slide_structure(filename: str):
+@app.get("/get_slide_structure/")
+async def get_slide_structure():
     """
-    Endpoint to get the structure of a slide presentation.
-
-    Args:
-        filename (str): The name of the file to analyze.
+    Analyse tous les fichiers PPTX présents dans le dossier pptx_folder.
 
     Returns:
-        dict: A dictionary containing the filename and the number of slides.
+        dict: Un dictionnaire contenant les structures des présentations analysées.
 
     Raises:
-        HTTPException: If the file does not exist, a 404 error is raised.
+        HTTPException: Si aucun fichier PPTX n'est trouvé.
     """
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
 
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
+    if not os.path.exists(UPLOAD_FOLDER):
+        raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
 
-    slides_data = analyze_presentation(file_path)
-    return {"filename": filename, "slide data": slides_data}
+    # Liste tous les fichiers dans le dossier
+    pptx_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(".pptx")]
+
+    # Si aucun fichier PPTX n'est trouvé, renvoyer un message
+    if not pptx_files:
+        return {"message": "Aucun fichier PPTX fourni."}
+
+    # Analyse chaque fichier PPTX
+    results = []
+    for filename in pptx_files:
+        file_path = os.path.join(UPLOAD_FOLDER, filename)
+        
+        try:
+            slides_data = analyze_presentation(file_path)  # Fonction d'analyse
+            results.append({"filename": filename, "slide data": slides_data})
+        except Exception as e:
+            results.append({"filename": filename, "error": f"Erreur lors de l'analyse: {str(e)}"})
+
+    return {"presentations": results}
+
 
 #  curl -X GET "http://localhost:5050/get_slide_structure_wcolor/CRA_SERVICE_CYBER.pptx"
 @app.get("/get_slide_structure_wcolor/{filename}")
@@ -126,6 +140,38 @@ async def download_file(filename: str):
         filename=filename,
         media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation'
     )
+
+@app.delete("/delete_all_pptx_files/")
+async def delete_all_pptx_files():
+    """
+    Supprime tous les fichiers du dossier pptx_folder.
+
+    Returns:
+        dict: Un message confirmant la suppression des fichiers.
+    
+    Raises:
+        HTTPException: Si le dossier n'existe pas.
+    """
+    pptx_folder = "./pptx_folder"  # Chemin du dossier contenant les fichiers à supprimer
+
+    if not os.path.exists(pptx_folder):
+        raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
+
+    # Liste des fichiers dans le dossier
+    files = os.listdir(pptx_folder)
+    
+    if not files:
+        return {"message": "Aucun fichier à supprimer."}
+
+    # Suppression des fichiers un par un
+    for file in files:
+        file_path = os.path.join(pptx_folder, file)
+        try:
+            os.remove(file_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression de {file}: {str(e)}")
+
+    return {"message": f"{len(files)} fichiers supprimés avec succès."}
 
 
 def run():
