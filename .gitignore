@@ -43,7 +43,6 @@ desktop.ini
 *.config
 *.ini
 
-*.yml
 
 node_modules/
 package-lock.json

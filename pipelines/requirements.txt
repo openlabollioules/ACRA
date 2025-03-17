@@ -1,0 +1,5 @@
+aiohttp
+typing
+langchain_ollama
+pydantic
+requests

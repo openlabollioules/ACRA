@@ -1,0 +1,33 @@
+services:
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3030:8080"
+    environment:
+      OPENAI_API_URL: "http://pipelines:9099"
+
+    volumes:
+      - ./open-webui:/app/backend/data 
+    depends_on:
+      - pipelines
+    networks:
+      - webui-net
+
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    ports:
+      - "9099:9099"
+    volumes:
+      - ./pipelines:/app/pipelines
+      - ./open-webui/uploads:/app/uploads # get the uploaded files
+      - ./pptx_folder:/app/pptx_folder
+    environment:
+      # - API_URL=http://host.docker.internal:5050 # API URL 
+      - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt
+      
+    networks:
+      - webui-net
+
+networks:
+  webui-net:
+    driver: bridge
