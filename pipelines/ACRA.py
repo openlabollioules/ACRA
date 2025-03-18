@@ -11,14 +11,14 @@ class Pipeline:
 
     class Valves(BaseModel): 
         LLAMAINDEX_OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
-        LLAMAINDEX_MODEL_NAME: str = "gemma3:12b"
+        LLAMAINDEX_MODEL_NAME: str = "gemma3:27b"
 
     def __init__(self):
 
         self.valves = self.Valves(
             **{
                 "LLAMAINDEX_OLLAMA_BASE_URL": os.getenv("LLAMAINDEX_OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
-                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "gemma3:12b"),
+                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "gemma3:27b"),
             }
         )
         
@@ -31,6 +31,8 @@ class Pipeline:
         self.openwebui_api = "http://host.docker.internal:3030"
 
         self.file_path_list = []
+
+        self.chat_id = ""
     
 
     def fetch(self, endpoint):
@@ -58,7 +60,7 @@ class Pipeline:
         result = ""
 
         if not presentations.get("presentations"):
-            return "❌ Aucun fichier PPTX fourni."
+            return "Aucun fichier PPTX fourni."
 
         for presentation in presentations["presentations"]:
             filename = presentation.get("filename", "Unknown File")
@@ -102,41 +104,32 @@ class Pipeline:
         return response
     
 
-
-    # async def inlet(self, body: dict, user: dict) -> dict:
-    #     """Modifies form data before the OpenAI API request."""
-
-    #     # Extract file info for all files in the body
-    #     # here i have created an inmemory dictionary to link users to their owned files
-    #     file_info = self._extract_file_info(body)
-    #     self.file_contents[user["id"]] = file_info
-    #     return body
-    
     async def inlet(self, body: dict, user: dict) -> dict:
         print(f"Received body: {body}")
         
-        # Extraction des informations de fichiers depuis body['metadata']['files']
+        # Get conversation ID from body
+        if body.get("metadata", {}).get("chat_id") != None:
+            self.chat_id = body.get("metadata", {}).get("chat_id", "default")
+        
+        # Create folder with conversation ID
+        conversation_folder = os.path.join("./pptx_folder", self.chat_id)
+        os.makedirs(conversation_folder, exist_ok=True)
+
+        # Extract files from body['metadata']['files']
         files = body.get("metadata", {}).get("files", [])
-        if files : 
+        if files:
             for file_entry in files:
-                # Récupération des infos du fichier dans le dictionnaire "file"
                 file_data = file_entry.get("file", {})
                 filename = file_data.get("filename", "N/A")
                 file_id = file_data.get("id", "N/A")
 
-                print(f"Filename: {filename}")
-                print(f"File ID: {file_id}")
-
-                # Correction de la concaténation pour obtenir le nom complet du fichier
                 filecomplete_name = file_id + "_" + filename
 
-                # Chemin source du fichier dans le dossier uploads
                 source_path = os.path.join("./uploads", filecomplete_name)
-                # Chemin de destination dans le dossier pptx_folder
-                destination_path = os.path.join("./pptx_folder", filecomplete_name)
+                # Update destination to use conversation folder
+                destination_path = os.path.join(conversation_folder, filecomplete_name)
                 
                 self.file_path_list.append(destination_path)
-                # Copie du fichier
                 shutil.copy(source_path, destination_path)
         
         return body
@@ -146,38 +139,50 @@ class Pipeline:
             self, body: dict, user_message: str, model_id: str, messages: List[dict]
         ) -> Union[str, Generator, Iterator]:
     
-        message = user_message
-
+        message = user_message.lower()  # Convert to lowercase for easier matching
         last_response = self.last_response
 
-        print(f"📥 Message actuel : {user_message}")
-        print(f"🔄 Dernière réponse générée (N-1) : {last_response}")
-
-        parts = user_message.strip().split(" ", 1)  # ["commande", "argument"]
-        command = parts[0].lower()
-        # argument = parts[1] if len(parts) > 1 else None
-
-        if command == "/summarize" :
-            # response = self.summarize_presentation()
-            response ="YESSSS JE SUMMARIZE "
-        elif command == "/structure":
+        # Check for commands anywhere in the message
+        if "/summarize" in message:
+            response = "YESSSS JE SUMMARIZE"
+            self.last_response = response
+            return response
+            
+        elif "/structure" in message:
             print('structure')
-            response = self.fetch(f"get_slide_structure/")
+            print("chat id : ",self.chat_id)
+            request_url = f"get_slide_structure/{self.chat_id}"
+            print("request : " , request_url )
+            response = self.fetch(request_url)
+            print("response : " , response)
             response = self.format_all_slide_data(response)
-        elif command == "/clear":
+            self.last_response = response
+            return response
+            
+        elif "/clear" in message:
             self.delete_all_files()
             response = "all the files are clear import new files for the ACRA to work properly :)"
-        else:
-            if last_response : 
-                message += f"\n\n *Last response generated :* {last_response}"
-            response = self.model.invoke(message)
-
+            self.last_response = response
+            return response
+            
+        # Only use Ollama for non-command messages
+        if last_response:
+            message += f"\n\n *Last response generated :* {last_response}"
+        response = self.model.invoke(message)
         self.last_response = response
         return response
     
 pipeline = Pipeline()
 
 
+# async def inlet(self, body: dict, user: dict) -> dict:
+#     """Modifies form data before the OpenAI API request."""
+
+#     # Extract file info for all files in the body
+#     # here i have created an inmemory dictionary to link users to their owned files
+#     file_info = self._extract_file_info(body)
+#     self.file_contents[user["id"]] = file_info
+#     return body
 # async def analyze_slide_structure(self, filename):
     #     response = await self._make_request(f"{self.api_url}/get_slide_structure/{filename}", "GET")
     #     return response

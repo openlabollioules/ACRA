@@ -3,3 +3,4 @@ langchain-openai
 fastapi
 python-multipart
 uvicorn
+python-dotenv

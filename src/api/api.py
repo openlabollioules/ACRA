@@ -4,14 +4,15 @@ import uvicorn
 from pptx import presentation
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse  
-
+from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors
 from services import update_table_cell
 from core import aggregate_and_summarize
+
 # starting Fast API 
 app = FastAPI() 
-
+load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
 
@@ -72,8 +73,8 @@ async def summarize_ppt(file: UploadFile = File(...)):
 
 # Testing the function with : 
 #  curl -X GET "http://localhost:5050/get_slide_structure/CRA_SERVICE_CYBER.pptx"
-@app.get("/get_slide_structure/")
-async def get_slide_structure():
+@app.get("/get_slide_structure/{folder}")
+async def get_slide_structure(folder: str):
     """
     Analyse tous les fichiers PPTX présents dans le dossier pptx_folder.
 
@@ -83,12 +84,12 @@ async def get_slide_structure():
     Raises:
         HTTPException: Si aucun fichier PPTX n'est trouvé.
     """
-
-    if not os.path.exists(UPLOAD_FOLDER):
+    folder_path = os.path.join(UPLOAD_FOLDER,folder)
+    if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
 
     # Liste tous les fichiers dans le dossier
-    pptx_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(".pptx")]
+    pptx_files = [f for f in os.listdir(folder_path) if f.endswith(".pptx")]
 
     # Si aucun fichier PPTX n'est trouvé, renvoyer un message
     if not pptx_files:
@@ -97,7 +98,7 @@ async def get_slide_structure():
     # Analyse chaque fichier PPTX
     results = []
     for filename in pptx_files:
-        file_path = os.path.join(UPLOAD_FOLDER, filename)
+        file_path = os.path.join(folder_path, filename)
         
         try:
             slides_data = analyze_presentation(file_path)  # Fonction d'analyse
