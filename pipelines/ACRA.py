@@ -11,14 +11,14 @@ class Pipeline:
 
     class Valves(BaseModel): 
         LLAMAINDEX_OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
-        LLAMAINDEX_MODEL_NAME: str = "phi4:latest"
+        LLAMAINDEX_MODEL_NAME: str = "gemma3:12b"
 
     def __init__(self):
 
         self.valves = self.Valves(
             **{
                 "LLAMAINDEX_OLLAMA_BASE_URL": os.getenv("LLAMAINDEX_OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
-                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "phi4:latest"),
+                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "gemma3:12b"),
             }
         )
         
@@ -164,6 +164,9 @@ class Pipeline:
             print('structure')
             response = self.fetch(f"get_slide_structure/")
             response = self.format_all_slide_data(response)
+        elif command == "/clear":
+            self.delete_all_files()
+            response = "all the files are clear import new files for the ACRA to work properly :)"
         else:
             if last_response : 
                 message += f"\n\n *Last response generated :* {last_response}"
