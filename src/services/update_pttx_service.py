@@ -1,5 +1,5 @@
 from pptx import Presentation
-
+import os
 def update_table_cell(pptx_path, slide_index, table_shape_index, row, col, new_text, output_path):
     """
     Updates the text of a cell in a table within a PowerPoint file.
@@ -13,6 +13,7 @@ def update_table_cell(pptx_path, slide_index, table_shape_index, row, col, new_t
       new_text (str): New text to insert into the cell.
       output_path (str): Path to save the updated .pptx file.
     """
+    os.makedirs(os.getenv("OUTPUT_FOLDER"), exist_ok=True)
     # Load the presentation
     prs = Presentation(pptx_path)
     

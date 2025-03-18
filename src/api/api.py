@@ -8,14 +8,14 @@ from fastapi.responses import FileResponse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors
 from services import update_table_cell
-
+from core import aggregate_and_summarize
 # starting Fast API 
 app = FastAPI() 
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
 @app.post("/acra/")
 async def summarize_ppt(file: UploadFile = File(...)):
     """
@@ -28,33 +28,47 @@ async def summarize_ppt(file: UploadFile = File(...)):
         dict: A dictionary containing the download URL of the updated PowerPoint file.
 
     Raises:
-        HTTPException: If the uploaded PowerPoint file is empty or does not contain any text.
+        HTTPException: If there's an error processing the PowerPoint file.
     """
+    try:
+        # Ensure the upload directory exists
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        
+        # Save the uploaded file
+        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Generate the summary from the PowerPoint files in the upload folder
+        summary_text = aggregate_and_summarize(UPLOAD_FOLDER)
+        
+        if not summary_text:
+            raise HTTPException(status_code=400, detail="Le PowerPoint est vide ou n'a pas de texte extractible.")
+        
+        # Update the template with the summary text
+        output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
+        summarized_file_path = update_table_cell(
+            pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
+            slide_index=0,  # first slide
+            table_shape_index=1,  # index of the table
+            row=1,  # Write inside the row 1 of the table (title area in row: 0,2,4)
+            col=0, 
+            new_text=summary_text, 
+            output_path=output_filename
+        )
 
-
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    text = (file_path)
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Le PowerPoint est vide ou n'a pas de texte.")
-
-    summary_text = "Here will be the response of the LLM"
-
-    summarized_file_patH = update_table_cell(
-        pptx_path= os.getenv("TEMPLATE_FILE"), # Template file 
-        slide_index=0, # first slide
-        table_shape_index=1, # index of the table
-        row=1, # Write inside the raw 1 of the table (title aera in row : 0,2,4)
-        col=0, 
-        new_text=summary_text, 
-        output_path="updated_presentation.pptx"
-    )
-
-    return {"download_url": f"/download/{summarized_file_patH}"}
+        # Clean up the upload folder - safely remove files first
+        for filename in os.listdir(UPLOAD_FOLDER):
+            file_to_remove = os.path.join(UPLOAD_FOLDER, filename)
+            if os.path.isfile(file_to_remove):
+                os.remove(file_to_remove)
+        
+        return {"download_url": f"/download/{summarized_file_path}"}
+    
+    except Exception as e:
+        # Log the exception for debugging
+        print(f"Error in summarize_ppt: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 # Testing the function with : 
 #  curl -X GET "http://localhost:5050/get_slide_structure/CRA_SERVICE_CYBER.pptx"

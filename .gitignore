@@ -11,6 +11,7 @@ venv/
 .idea/
 .env/
 .venv/
+.vscode/
 env/
 conda_env/
 benchmark_output/

@@ -1,3 +1,4 @@
+import os
 from pptx import Presentation
 
 def analyze_presentation(file_path="./pptx_folder/CRA_SERVICE_CYBER.pptx"):
@@ -178,5 +179,12 @@ def analyze_presentation_with_colors(file_path="./pptx_folder/CRA_SERVICE_CYBER.
             slide_data["shapes"].append(shape_data)
 
         presentation_data["slides"].append(slide_data)
+    
+    print(presentation_data)
 
     return presentation_data
+
+if __name__ == "__main__":
+    # os.chdir("")
+    print(os.getcwd())
+    analyze_presentation_with_colors()
