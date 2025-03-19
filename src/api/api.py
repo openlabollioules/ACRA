@@ -6,7 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse  
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from analist import analyze_presentation , analyze_presentation_with_colors
+from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
 from services import update_table_cell
 from core import aggregate_and_summarize
 # starting Fast API 
@@ -83,13 +83,11 @@ async def get_slide_structure():
     Raises:
         HTTPException: Si aucun fichier PPTX n'est trouvé.
     """
-
     if not os.path.exists(UPLOAD_FOLDER):
         raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
 
     # Liste tous les fichiers dans le dossier
     pptx_files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith(".pptx")]
-
     # Si aucun fichier PPTX n'est trouvé, renvoyer un message
     if not pptx_files:
         return {"message": "Aucun fichier PPTX fourni."}
@@ -98,13 +96,20 @@ async def get_slide_structure():
     results = []
     for filename in pptx_files:
         file_path = os.path.join(UPLOAD_FOLDER, filename)
-        
         try:
-            slides_data = analyze_presentation(file_path)  # Fonction d'analyse
-            results.append({"filename": filename, "slide data": slides_data})
+            slides_data = analyze_presentation(file_path)  # Fonction d'analyse de la structure basique
+            
+            # Extraire les données sur les projets
+            project_data = extract_projects_from_presentation(file_path)
+            
+            # Ajouter les deux ensembles de données au résultat
+            results.append({
+                "filename": filename, 
+                "slide data": slides_data,
+                "project_data": project_data
+            })
         except Exception as e:
             results.append({"filename": filename, "error": f"Erreur lors de l'analyse: {str(e)}"})
-
     return {"presentations": results}
 
 
