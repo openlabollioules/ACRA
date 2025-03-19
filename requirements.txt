@@ -2,7 +2,8 @@ python-pptx>=0.6.21
 langchain-openai
 fastapi>=0.68.0
 python-multipart>=0.0.5
-uvicorn>=0.15.0
+uvicorn
+python-dotenv>=0.15.0
 requests>=2.26.0
 langchain-ollama>=0.0.1
 pydantic>=1.8.2
