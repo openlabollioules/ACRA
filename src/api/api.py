@@ -73,8 +73,8 @@ async def summarize_ppt(file: UploadFile = File(...)):
 
 # Testing the function with : 
 #  curl -X GET "http://localhost:5050/get_slide_structure/CRA_SERVICE_CYBER.pptx"
-@app.get("/get_slide_structure/{folder}")
-async def get_slide_structure(folder: str):
+@app.get("/get_slide_structure/{foldername}")
+async def get_slide_structure(foldername: str):
     """
     Analyse tous les fichiers PPTX présents dans le dossier pptx_folder.
 
@@ -84,7 +84,7 @@ async def get_slide_structure(folder: str):
     Raises:
         HTTPException: Si aucun fichier PPTX n'est trouvé.
     """
-    folder_path = os.path.join(UPLOAD_FOLDER,folder)
+    folder_path = os.path.join(UPLOAD_FOLDER,foldername)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
 
@@ -156,8 +156,8 @@ async def download_file(filename: str):
         media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation'
     )
 
-@app.delete("/delete_all_pptx_files/")
-async def delete_all_pptx_files():
+@app.delete("/delete_all_pptx_files/{foldername}")
+async def delete_all_pptx_files(foldername:str):
     """
     Supprime tous les fichiers du dossier pptx_folder.
 
@@ -167,8 +167,7 @@ async def delete_all_pptx_files():
     Raises:
         HTTPException: Si le dossier n'existe pas.
     """
-    pptx_folder = "./pptx_folder"  # Chemin du dossier contenant les fichiers à supprimer
-
+    pptx_folder = os.path.join(UPLOAD_FOLDER, foldername)
     if not os.path.exists(pptx_folder):
         raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
 

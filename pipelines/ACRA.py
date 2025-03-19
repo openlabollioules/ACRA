@@ -9,22 +9,21 @@ from pydantic import BaseModel
 
 class Pipeline:
 
-    class Valves(BaseModel): 
-        LLAMAINDEX_OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
-        LLAMAINDEX_MODEL_NAME: str = "gemma3:27b"
+    # class Valves(BaseModel): 
+    #     LLAMAINDEX_OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
+    #     LLAMAINDEX_MODEL_NAME: str = "gemma3:27b"
 
     def __init__(self):
 
-        self.valves = self.Valves(
-            **{
-                "LLAMAINDEX_OLLAMA_BASE_URL": os.getenv("LLAMAINDEX_OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
-                "LLAMAINDEX_MODEL_NAME": os.getenv("LLAMAINDEX_MODEL_NAME", "gemma3:27b"),
-            }
-        )
+        # self.valves = self.Valves(
+        #     **{
+                
+        #     }
+        # )
         
         self.last_response = None
 
-        self.model = OllamaLLM(model=self.valves.LLAMAINDEX_MODEL_NAME, base_url=self.valves.LLAMAINDEX_OLLAMA_BASE_URL)
+        self.model = OllamaLLM(model="gemma3:27b", base_url="http://host.docker.internal:11434")
         
         self.api_url = "http://host.docker.internal:5050"
 
@@ -96,8 +95,8 @@ class Pipeline:
         return result.strip()
 
 
-    def delete_all_files(self):
-        url = f"{self.api_url}/delete_all_pptx_files"
+    def delete_all_files(self,folder):
+        url = f"{self.api_url}/delete_all_pptx_files{folder}"
         response = requests.delete(url) 
         print(response)
 
@@ -160,8 +159,7 @@ class Pipeline:
             return response
             
         elif "/clear" in message:
-            self.delete_all_files()
-            response = "all the files are clear import new files for the ACRA to work properly :)"
+            response = self.delete_all_files(self.chat_id).get('message')
             self.last_response = response
             return response
             
