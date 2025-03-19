@@ -6,7 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse  
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from analist import analyze_presentation , analyze_presentation_with_colors
+from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
 from services import update_table_cell
 from core import aggregate_and_summarize
 
@@ -101,11 +101,19 @@ async def get_slide_structure(foldername: str):
         file_path = os.path.join(folder_path, filename)
         
         try:
-            slides_data = analyze_presentation(file_path)  # Fonction d'analyse
-            results.append({"filename": filename, "slide data": slides_data})
+            slides_data = analyze_presentation(file_path)  # Fonction d'analyse de la structure basique
+            
+            # Extraire les données sur les projets
+            project_data = extract_projects_from_presentation(file_path)
+            
+            # Ajouter les deux ensembles de données au résultat
+            results.append({
+                "filename": filename, 
+                "slide data": slides_data,
+                "project_data": project_data
+            })
         except Exception as e:
             results.append({"filename": filename, "error": f"Erreur lors de l'analyse: {str(e)}"})
-
     return {"presentations": results}
 
 

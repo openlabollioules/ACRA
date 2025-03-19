@@ -1,7 +1,7 @@
 import json
 import re
 from typing import Dict, List, Any, Optional
-from project_extractor import extract_and_format_projects
+from .project_extractor import extract_and_format_projects
 
 def analyze_rgb_tags(text: str) -> Dict[str, List[str]]:
     """
