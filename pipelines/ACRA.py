@@ -76,11 +76,13 @@ class Pipeline:
             temp_alerts_advancements = []
             temp_global_content = []
             content = presentation.get("project_data", {})
+            activites = content.get('activities', {})
+            evenements = content.get('upcoming_events', [])
 
-            for item in content:
-                temp_global_content.append(f"{item} : {content.get(item).get('information')}")
-                if content.get(item).get("alerts"):
-                    alerts = content.get(item).get("alerts")
+            for item in activites:
+                temp_global_content.append(f"{item} : {activites.get(item).get('information')}")
+                if activites.get(item).get("alerts"):
+                    alerts = activites.get(item).get("alerts")
                     temp_alerts_critical.extend(f"**{item}**\n{alert}\n" for alert in alerts.get("critical_alerts", []))
                     temp_alerts_warning.extend(f"**{item}**\n{alert}\n" for alert in alerts.get("small_alerts", []))
                     temp_alerts_advancements.extend(f"**{item}**\n{alert}\n" for alert in alerts.get("advancements", [])) 
@@ -89,6 +91,7 @@ class Pipeline:
             result += f"🔴 **Alertes Critiques :**\n{temp_alerts_critical}\n"
             result += f"🟡 **Alertes à surveiller :**\n{temp_alerts_warning}\n"
             result += f"🟢 **Avancements :**\n{temp_alerts_advancements}\n"
+            result += f"\n**Evenements de la semaine à venir :**\n{evenements}\n"
             
             result += "-" * 50 + "\n"  # Séparateur entre fichiers
 
@@ -116,7 +119,6 @@ class Pipeline:
 
         # Extract files from body['metadata']['files']
         files = body.get("metadata", {}).get("files", [])
-        if files:
         if files:
             for file_entry in files:
                 file_data = file_entry.get("file", {})

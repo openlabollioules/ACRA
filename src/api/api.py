@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
-from services import update_table_cell
+from services import update_table_cell, update_table_multiple_cells
 from core import aggregate_and_summarize
 
 # starting Fast API 
@@ -41,20 +41,39 @@ async def summarize_ppt(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         # Generate the summary from the PowerPoint files in the upload folder
-        summary_text = aggregate_and_summarize(UPLOAD_FOLDER)
+        summary_data = aggregate_and_summarize(UPLOAD_FOLDER)
         
-        if not summary_text:
+        if not summary_data or (not summary_data.get("common_info") and not summary_data.get("upcoming_info")):
             raise HTTPException(status_code=400, detail="Le PowerPoint est vide ou n'a pas de texte extractible.")
         
-        # Update the template with the summary text
+        # Update the template with the summary data
         output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
-        summarized_file_path = update_table_cell(
+        
+        # Prepare the updates for the table - Row 1 for common info, Row 3 for upcoming info
+        updates = []
+        
+        # Add common information to row 1
+        if summary_data.get("common_info"):
+            updates.append({
+                'row': 1,
+                'col': 0,
+                'text': summary_data["common_info"]
+            })
+        
+        # Add upcoming work information to row 3
+        if summary_data.get("upcoming_info"):
+            updates.append({
+                'row': 3,
+                'col': 0,
+                'text': summary_data["upcoming_info"]
+            })
+        
+        # Update the template with both common info and upcoming work info
+        summarized_file_path = update_table_multiple_cells(
             pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
             slide_index=0,  # first slide
             table_shape_index=1,  # index of the table
-            row=1,  # Write inside the row 1 of the table (title area in row: 0,2,4)
-            col=0, 
-            new_text=summary_text, 
+            updates=updates,
             output_path=output_filename
         )
 
@@ -100,16 +119,13 @@ async def get_slide_structure(foldername: str):
     for filename in pptx_files:
         file_path = os.path.join(folder_path, filename)
         
-        try:
-            slides_data = analyze_presentation(file_path)  # Fonction d'analyse de la structure basique
-            
+        try:            
             # Extraire les données sur les projets
             project_data = extract_projects_from_presentation(file_path)
             
             # Ajouter les deux ensembles de données au résultat
             results.append({
                 "filename": filename, 
-                "slide data": slides_data,
                 "project_data": project_data
             })
         except Exception as e:
