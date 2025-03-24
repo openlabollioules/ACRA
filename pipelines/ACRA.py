@@ -4,7 +4,6 @@ import shutil
 import requests
 from typing import List, Union, Generator, Iterator
 from langchain_ollama import  OllamaLLM
-from pydantic import BaseModel
 
 
 
@@ -24,15 +23,13 @@ class Pipeline:
         
         self.last_response = None
 
-        self.model = OllamaLLM(model="gemma3:27b", base_url="http://host.docker.internal:11434")
+        self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
         
         self.api_url = "http://host.docker.internal:5050"
 
         self.openwebui_api = "http://host.docker.internal:3030"
 
         self.file_path_list = []
-
-        self.chat_id = ""
 
         self.chat_id = ""
     
@@ -43,11 +40,65 @@ class Pipeline:
             response = requests.get(url)
             return response.json() if response.status_code == 200 else {"error": "Request failed"}
 
-    def summarize_presentation(self, filename):
-        return self.fetch(f"acra/{filename}")
+    def post(self, endpoint, data=None, files=None):
+        """Effectue une requête POST synchrone"""
+        url = f"{self.api_url}/{endpoint}"
+        response = requests.post(url, data=data, files=files)
+        return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
-    def analyze_slide_structure(self, filename):
-        return self.fetch(f"get_slide_structure/{filename}")
+    def summarize_presentation(self, filename, folder_name=None):
+        """
+        Envoie une demande pour résumer un fichier PowerPoint.
+        
+        Args:
+            filename (str): Le nom du fichier à résumer.
+            folder_name (str, optional): Le nom du dossier où se trouve le fichier. Si None, utilise le chat_id.
+        
+        Returns:
+            dict: Les résultats de l'opération de résumé.
+        """
+        if folder_name is None:
+            folder_name = self.chat_id
+            
+        file_path = os.path.join("./pptx_folder", folder_name, filename)
+        
+        if not os.path.exists(file_path):
+            return {"error": f"Le fichier {filename} n'existe pas dans le dossier {folder_name}"}
+        
+        with open(file_path, 'rb') as f:
+            files = {'file': (filename, f)}
+            data = {'folder_name': folder_name}
+            return self.post("acra/", data=data, files=files)
+
+    def summarize_folder(self, folder_name=None):
+        """
+        Envoie une demande pour résumer tous les fichiers PowerPoint dans un dossier.
+        
+        Args:
+            folder_name (str, optional): Le nom du dossier à résumer. Si None, utilise le chat_id.
+        
+        Returns:
+            dict: Les résultats de l'opération de résumé.
+        """
+        if folder_name is None:
+            folder_name = self.chat_id
+            
+        return self.post(f"acra/summarize_folder/?folder_name={folder_name}")
+
+    def analyze_slide_structure(self, folder_name=None):
+        """
+        Analyse la structure des diapositives dans un dossier.
+        
+        Args:
+            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
+        
+        Returns:
+            dict: Les résultats de l'analyse.
+        """
+        if folder_name is None:
+            folder_name = self.chat_id
+            
+        return self.fetch(f"get_slide_structure/{folder_name}")
     
     def format_all_slide_data(self, presentations: dict) -> str:
         """
@@ -80,31 +131,101 @@ class Pipeline:
             evenements = content.get('upcoming_events', [])
 
             for item in activites:
-                temp_global_content.append(f"{item} : {activites.get(item).get('information')}")
+                # Format global content with project name as a heading
+                temp_global_content.append(f"**{item}**:\n{activites.get(item).get('information')}")
+                
                 if activites.get(item).get("alerts"):
                     alerts = activites.get(item).get("alerts")
-                    temp_alerts_critical.extend(f"**{item}**\n{alert}\n" for alert in alerts.get("critical_alerts", []))
-                    temp_alerts_warning.extend(f"**{item}**\n{alert}\n" for alert in alerts.get("small_alerts", []))
-                    temp_alerts_advancements.extend(f"**{item}**\n{alert}\n" for alert in alerts.get("advancements", [])) 
+                    
+                    # Format critical alerts
+                    if alerts.get("critical_alerts"):
+                        temp_alerts_critical.append(f"**{item}**:")
+                        for alert in alerts.get("critical_alerts", []):
+                            temp_alerts_critical.append(f"- {alert}")
+                    
+                    # Format small alerts
+                    if alerts.get("small_alerts"):
+                        temp_alerts_warning.append(f"**{item}**:")
+                        for alert in alerts.get("small_alerts", []):
+                            temp_alerts_warning.append(f"- {alert}")
+                    
+                    # Format advancements
+                    if alerts.get("advancements"):
+                        temp_alerts_advancements.append(f"**{item}**:")
+                        for advancement in alerts.get("advancements", []):
+                            temp_alerts_advancements.append(f"- {advancement}")
 
-            result += f"Informations globales : {temp_global_content}\n"
-            result += f"🔴 **Alertes Critiques :**\n{temp_alerts_critical}\n"
-            result += f"🟡 **Alertes à surveiller :**\n{temp_alerts_warning}\n"
-            result += f"🟢 **Avancements :**\n{temp_alerts_advancements}\n"
-            result += f"\n**Evenements de la semaine à venir :**\n{evenements}\n"
+            # Format global information section
+            result += "**Informations globales:**\n"
+            for info in temp_global_content:
+                result += f"{info}\n\n"
+            
+            # Format alerts sections with better styling
+            if temp_alerts_critical:
+                result += "🔴 **Alertes Critiques:**\n"
+                result += "\n".join(temp_alerts_critical) + "\n\n"
+            else:
+                result += "🔴 **Alertes Critiques:** Aucune alerte critique à signaler.\n\n"
+                
+            if temp_alerts_warning:
+                result += "🟡 **Alertes à surveiller:**\n"
+                result += "\n".join(temp_alerts_warning) + "\n\n"
+            else:
+                result += "🟡 **Alertes à surveiller:** Aucune alerte mineure à signaler.\n\n"
+                
+            if temp_alerts_advancements:
+                result += "🟢 **Avancements:**\n"
+                result += "\n".join(temp_alerts_advancements) + "\n\n"
+            else:
+                result += "🟢 **Avancements:** Aucun avancement significatif à signaler.\n\n"
+
+            # Format upcoming events section
+            result += "**Evénements des semaines à venir:**\n"
+            if evenements:
+                result += f"{evenements}\n\n"
+            else:
+                result += "Aucun événement particulier prévu pour les semaines à venir.\n\n"
             
             result += "-" * 50 + "\n"  # Séparateur entre fichiers
 
         return result.strip()
 
 
-    def delete_all_files(self,folder):
-        url = f"{self.api_url}/delete_all_pptx_files{folder}"
+    def delete_all_files(self, folder=None):
+        """
+        Supprime tous les fichiers dans un dossier.
+        
+        Args:
+            folder (str, optional): Le nom du dossier à vider. Si None, utilise le chat_id.
+        
+        Returns:
+            dict: Les résultats de l'opération de suppression.
+        """
+        if folder is None:
+            folder = self.chat_id
+            
+        url = f"{self.api_url}/delete_all_pptx_files/{folder}"
         response = requests.delete(url) 
-        print(response)
-
-        return response
+        return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
     
+    def get_files_in_folder(self, folder_name=None):
+        """
+        Récupère la liste des fichiers dans un dossier.
+        
+        Args:
+            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
+        
+        Returns:
+            list: Liste des noms de fichiers PPTX dans le dossier.
+        """
+        if folder_name is None:
+            folder_name = self.chat_id
+            
+        folder_path = os.path.join("./pptx_folder", folder_name)
+        if not os.path.exists(folder_path):
+            return []
+            
+        return [f for f in os.listdir(folder_path) if f.lower().endswith(".pptx")]
 
     async def inlet(self, body: dict, user: dict) -> dict:
         print(f"Received body: {body}")
@@ -144,33 +265,115 @@ class Pipeline:
         message = user_message.lower()  # Convert to lowercase for easier matching
         last_response = self.last_response
 
+        # Validate that we have a chat_id
+        if not self.chat_id:
+            response = "Erreur: Impossible d'identifier la conversation. Veuillez réessayer."
+            self.last_response = response
+            return response
+
         # Check for commands anywhere in the message
         if "/summarize" in message:
-            response = "YESSSS JE SUMMARIZE"
+            # Check if it's a summarize_folder command
+            if "folder" in message or "dossier" in message:
+                # Summarize all files in the chat_id folder
+                response = self.summarize_folder()
+                if "error" in response:
+                    response = f"Erreur lors de la génération du résumé: {response['error']}"
+                else:
+                    response = f"Le résumé du dossier a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
+            else:
+                # Try to extract a filename from the message
+                filename = None
+                words = message.split()
+                for i, word in enumerate(words):
+                    if word == "/summarize" and i + 1 < len(words) and not words[i+1].startswith("/"):
+                        filename = words[i+1]
+                        break
+                
+                # If a filename was provided and it exists in the folder
+                if filename:
+                    # Get list of files in the folder
+                    available_files = self.get_files_in_folder()
+                    
+                    # Find a match for the provided filename (partial match)
+                    matching_files = [f for f in available_files if filename.lower() in f.lower()]
+                    
+                    if matching_files:
+                        # Use the first matching file
+                        file_to_summarize = matching_files[0]
+                        response = self.summarize_presentation(file_to_summarize)
+                        if "error" in response:
+                            response = f"Erreur lors de la génération du résumé: {response['error']}"
+                        else:
+                            response = f"Le résumé du fichier '{file_to_summarize}' a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
+                    else:
+                        # No matching file found
+                        available_files_msg = "\n- " + "\n- ".join(available_files) if available_files else " (aucun fichier disponible)"
+                        response = f"Aucun fichier ne correspond à '{filename}'. Fichiers disponibles: {available_files_msg}"
+                else:
+                    # No filename provided, summarize all files by default
+                    response = self.summarize_folder()
+                    if "error" in response:
+                        response = f"Erreur lors de la génération du résumé: {response['error']}"
+                    else:
+                        response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
+            
             self.last_response = response
             return response
             
         elif "/structure" in message:
             print('structure')
-            print("chat id : ",self.chat_id)
-            request_url = f"get_slide_structure/{self.chat_id}"
-            print("request : " , request_url )
-            response = self.fetch(request_url)
-            print("response : " , response)
-            response = self.format_all_slide_data(response)
+            print("chat id : ", self.chat_id)
+            response = self.analyze_slide_structure()
+            print("response : ", response)
+            if "error" in response:
+                response = f"Erreur lors de l'analyse de la structure: {response['error']}"
+            else:
+                response = self.format_all_slide_data(response)
             self.last_response = response
             return response
             
         elif "/clear" in message:
-            response = self.delete_all_files(self.chat_id).get('message')
+            response = self.delete_all_files()
+            if "error" in response:
+                response = f"Erreur lors de la suppression des fichiers: {response['error']}"
+            else:
+                response = response.get('message', "Les fichiers ont été supprimés avec succès.")
+                self.file_path_list = []  # Clear the file path list
             self.last_response = response
             return response
             
         # Only use Ollama for non-command messages
-        if last_response:
-            message += f"\n\n *Last response generated :* {last_response}"
-        response = self.model.invoke(message)
-        self.last_response = response
-        return response
+        # Nettoyage et ajout du flag de raisonnement
+        if model_id.startswith("reasoning/"):
+            model_id = model_id.replace("reasoning/", "", 1)
+        
+        # Concaténer le dernier contexte (si disponible)
+        if self.last_response:
+            user_message += f"\n\n*Last response generated:* {self.last_response}"
+        
+        # Préparer le payload en incluant le flag de raisonnement
+        payload = {
+            "model": model_id,
+            "prompt": user_message,
+            "include_reasoning": True,
+            # éventuellement d'autres paramètres spécifiques
+        }
+        
+        # Exemple d'appel via une API ou méthode custom (ici à adapter selon OllamaLLM)
+        response = self.model.invoke(user_message)  # ou un appel à l'API avec le payload préparé
+        
+        # Post-traitement pour ajouter le raisonnement dans la réponse finale
+        if isinstance(response, dict) and "choices" in response:
+            for choice in response["choices"]:
+                if "message" in choice and "reasoning" in choice["message"]:
+                    reasoning = choice["message"]["reasoning"]
+                    choice["message"]["content"] = f"<think>{reasoning}</think>\n{choice['message']['content']}"
+            final_response = "\n".join([choice["message"]["content"] for choice in response["choices"]])
+        else:
+            final_response = response  # si c'est simplement une chaîne
+        
+        self.last_response = final_response
+        return final_response
     
 pipeline = Pipeline()
