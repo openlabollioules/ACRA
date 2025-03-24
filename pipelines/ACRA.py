@@ -24,7 +24,7 @@ class Pipeline:
         
         self.last_response = None
 
-        self.model = OllamaLLM(model="gemma3:27b", base_url="http://host.docker.internal:11434")
+        self.model = OllamaLLM(model="qwq:latest", base_url="http://host.docker.internal:11434" , num_ctx=32000)
         
         self.api_url = "http://host.docker.internal:5050"
 
@@ -32,8 +32,7 @@ class Pipeline:
 
         self.file_path_list = []
 
-        self.chat_id = ""
-
+        self.context = ""
         self.chat_id = ""
     
 
@@ -43,8 +42,8 @@ class Pipeline:
             response = requests.get(url)
             return response.json() if response.status_code == 200 else {"error": "Request failed"}
 
-    def summarize_presentation(self, filename):
-        return self.fetch(f"acra/{filename}")
+    def summarize_presentation(self, foldername):
+        return self.fetch(f"summarize_pptx/{foldername}")
 
     def analyze_slide_structure(self, filename):
         return self.fetch(f"get_slide_structure/{filename}")
@@ -96,13 +95,12 @@ class Pipeline:
 
 
     def delete_all_files(self,folder):
-        url = f"{self.api_url}/delete_all_pptx_files{folder}"
+        url = f"{self.api_url}/delete_all_pptx_files/{folder}"
         response = requests.delete(url) 
         print(response)
 
         return response
     
-
     async def inlet(self, body: dict, user: dict) -> dict:
         print(f"Received body: {body}")
         
@@ -116,7 +114,6 @@ class Pipeline:
 
         # Extract files from body['metadata']['files']
         files = body.get("metadata", {}).get("files", [])
-        if files:
         if files:
             for file_entry in files:
                 file_data = file_entry.get("file", {})
@@ -144,8 +141,10 @@ class Pipeline:
 
         # Check for commands anywhere in the message
         if "/summarize" in message:
-            response = "YESSSS JE SUMMARIZE"
-            self.last_response = response
+            response = self.summarize_presentation(self.chat_id)
+            url = "http://localhost:5050" +response.get("download_url")
+            self.last_response = response.get("summary")
+            response = self.last_response + "\n\n download file : \n " + url
             return response
             
         elif "/structure" in message:
@@ -162,13 +161,21 @@ class Pipeline:
         elif "/clear" in message:
             response = self.delete_all_files(self.chat_id).get('message')
             self.last_response = response
-            return response
-            
+            return response        
+
         # Only use Ollama for non-command messages
         if last_response:
             message += f"\n\n *Last response generated :* {last_response}"
+            commands=""
+        else : 
+            commands = """Les commandes sont les suivantes : \n
+            /summarize --> Résume tous les fichiers pptx envoyé  
+            /structure --> Renvoie la structure des fichiers 
+            /clear --> Retire tous les fichiers de la conversation
+            """
         response = self.model.invoke(message)
+            
         self.last_response = response
-        return response
-    
+        return commands + response
+        
 pipeline = Pipeline()

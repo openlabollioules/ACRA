@@ -7,8 +7,9 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
-from services import update_table_cell
+from services import update_table_cell, get_files_from_folder
 from core import aggregate_and_summarize
+from datetime import datetime
 
 # starting Fast API 
 app = FastAPI() 
@@ -16,9 +17,9 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
 
-# curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
-@app.post("/acra/")
-async def summarize_ppt(file: UploadFile = File(...)):
+# curl -X GET "http://localhost:5050/summarize_pptx/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
+@app.get("/summarize_pptx/{foldername}")
+async def summarize_pptx(foldername:str):
     """
     Summarizes the content of an uploaded PowerPoint file and updates a template PowerPoint file with the summary.
 
@@ -34,20 +35,20 @@ async def summarize_ppt(file: UploadFile = File(...)):
     try:
         # Ensure the upload directory exists
         os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        os.makedirs(OUTPUT_FOLDER, exist_ok=True)
         
         # Save the uploaded file
-        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
+        folder_path = os.path.join("./",UPLOAD_FOLDER, foldername)
+         
         # Generate the summary from the PowerPoint files in the upload folder
-        summary_text = aggregate_and_summarize(UPLOAD_FOLDER)
+        summary_text = aggregate_and_summarize(folder_path)
         
         if not summary_text:
             raise HTTPException(status_code=400, detail="Le PowerPoint est vide ou n'a pas de texte extractible.")
         
         # Update the template with the summary text
         output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
+        
         summarized_file_path = update_table_cell(
             pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
             slide_index=0,  # first slide
@@ -63,8 +64,9 @@ async def summarize_ppt(file: UploadFile = File(...)):
             file_to_remove = os.path.join(UPLOAD_FOLDER, filename)
             if os.path.isfile(file_to_remove):
                 os.remove(file_to_remove)
-        
-        return {"download_url": f"/download/{summarized_file_path}"}
+
+        summarized_file_path = summarized_file_path.split("/")
+        return {"download_url": f"/download/{summarized_file_path[-1]}", "summary": summary_text}
     
     except Exception as e:
         # Log the exception for debugging
@@ -195,6 +197,21 @@ async def delete_all_pptx_files(foldername:str):
 
     return {"message": f"{len(files)} fichiers supprimés avec succès."}
 
+@app.get("/get_all_pptx_files/{foldername}")
+async def get_all_pptx_files(foldername:str):
+    folder_path = os.path.join(UPLOAD_FOLDER ,foldername)
+    return get_files_from_folder(folder_path)
+
+@app.get("/get_week")
+async def get_week():
+    """
+    Get the current week number of the year.
+    
+    Returns:
+        dict: A dictionary containing the current week number.
+    """
+    current_week = datetime.now().isocalendar()[1]
+    return {"week": current_week}
 
 def run():
     uvicorn.run(app, host="0.0.0.0", port=5050)

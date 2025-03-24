@@ -82,7 +82,7 @@ def aggregate_and_summarize(pptx_folder):
     """
     Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
     """
-    title_pattern = re.compile(r"^CRA.*S\d+$")
+    title_pattern = "whessss"
     expected_titles = [
         "Activités de la semaine",
         "Alertes et Points durs",
@@ -92,6 +92,6 @@ def aggregate_and_summarize(pptx_folder):
     summary = remove_tags_no_keep(summarize_sections(aggregated_sections), "<think>", "</think>")
     return summary
 
-if __name__ == "__main__":
-    folder = "pptx_folder"  # Update with your actual folder path
-    aggregate_and_summarize(folder)
+# if __name__ == "__main__":
+#     folder = "pptx_folder"  
+#     aggregate_and_summarize(folder)

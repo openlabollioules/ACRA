@@ -25,6 +25,7 @@ models/
 *.h5
 *.pt
 *.ckpt
+temp.txt
 
 audiofiles/
 transcription_archives/
