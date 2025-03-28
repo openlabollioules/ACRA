@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
-from services import update_table_cell, update_table_multiple_cells
+from services import update_table_cell, update_table_multiple_cells, update_table_with_project_data
 from core import aggregate_and_summarize
 
 # starting Fast API 
@@ -17,20 +17,27 @@ UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
-@app.post("/acra/")
-async def summarize_ppt(file: UploadFile = File(...), folder_name: str = Form(None)):
+@app.get("/acra/{folder_name}")
+async def summarize_ppt(folder_name: str):
     """
-    Summarizes the content of an uploaded PowerPoint file and updates a template PowerPoint file with the summary.
+    Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
+    The PowerPoint will be structured with 3 columns:
+      - Column 1: Project names (each project in a separate row)
+      - Column 2: Project information with colored text:
+          * Black: Common information
+          * Green: Advancements
+          * Orange: Small alerts
+          * Red: Critical alerts
+      - Column 3: Upcoming events (all in one row)
 
     Args:
-        file (UploadFile): The uploaded PowerPoint file to be summarized.
-        folder_name (str, optional): The name of the folder to save the file to. If not provided, a default folder is used.
+        folder_name (str): The name of the folder containing PowerPoint files to analyze.
 
     Returns:
         dict: A dictionary containing the download URL of the updated PowerPoint file.
 
     Raises:
-        HTTPException: If there's an error processing the PowerPoint file.
+        HTTPException: If there's an error processing the PowerPoint files.
     """
     try:
         # Determine the target folder
@@ -41,178 +48,34 @@ async def summarize_ppt(file: UploadFile = File(...), folder_name: str = Form(No
         # Ensure the upload directory exists
         os.makedirs(target_folder, exist_ok=True)
         
-        # Save the uploaded file
-        file_path = os.path.join(target_folder, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
         # Generate the summary from the PowerPoint files in the target folder
-        summary_data = aggregate_and_summarize(target_folder)
+        project_data = aggregate_and_summarize(target_folder)
         
-        if not summary_data or (not summary_data.get("common_info") and not summary_data.get("upcoming_info")
-                            and not summary_data.get("advancements") and not summary_data.get("small_alerts") 
-                            and not summary_data.get("critical_alerts")):
-            raise HTTPException(status_code=400, detail="Le PowerPoint est vide ou n'a pas de texte extractible.")
+        # Check if we have any data to show
+        if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
+            raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier.")
         
-        # Update the template with the summary data
+        # Set the output filename
         output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
         if folder_name:
             output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
         
-        # Prepare the updates for the table
-        updates = []
-        
-        # Add common information to row 1
-        if summary_data.get("common_info"):
-            updates.append({
-                'row': 1,
-                'col': 0,
-                'text': summary_data["common_info"]
-            })
-        
-        # Add advancements information to row 2, column 0
-        if summary_data.get("advancements") and summary_data["advancements"] != "Aucun avancement significatif à signaler.":
-            updates.append({
-                'row': 2,
-                'col': 0,
-                'text': "🟢 Avancements:\n" + summary_data["advancements"]
-            })
-        
-        # Add small alerts information to row 2, column 1
-        if summary_data.get("small_alerts") and summary_data["small_alerts"] != "Aucune alerte mineure à signaler.":
-            updates.append({
-                'row': 2,
-                'col': 1,
-                'text': "🟡 Alertes mineures:\n" + summary_data["small_alerts"]
-            })
-            
-        # Add critical alerts information to row 2, column 2
-        if summary_data.get("critical_alerts") and summary_data["critical_alerts"] != "Aucune alerte critique à signaler.":
-            updates.append({
-                'row': 2,
-                'col': 2,
-                'text': "🔴 Alertes critiques:\n" + summary_data["critical_alerts"]
-            })
-        
-        # Add upcoming work information to row 3
-        if summary_data.get("upcoming_info"):
-            updates.append({
-                'row': 3,
-                'col': 0,
-                'text': summary_data["upcoming_info"]
-            })
-        
-        # Update the template with all the extracted information
-        summarized_file_path = update_table_multiple_cells(
+        # Update the template with the project data using the new format
+        summarized_file_path = update_table_with_project_data(
             pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
             slide_index=0,  # first slide
-            table_shape_index=1,  # index of the table
-            updates=updates,
-            output_path=output_filename
-        )
-
-        # Return the download URL (no cleanup to allow for folder management)
-        filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"/download/{filename}"}
-    
-    except Exception as e:
-        # Log the exception for debugging
-        print(f"Error in summarize_ppt: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
-
-# Add a new endpoint to summarize an existing folder
-@app.post("/acra/summarize_folder/")
-async def summarize_folder(folder_name: str = Query(..., description="The name of the folder containing PowerPoint files to summarize")):
-    """
-    Summarizes all PowerPoint files in the specified folder.
-
-    Args:
-        folder_name (str): The name of the folder containing PowerPoint files to summarize.
-
-    Returns:
-        dict: A dictionary containing the download URL of the updated PowerPoint file.
-
-    Raises:
-        HTTPException: If there's an error processing the PowerPoint files.
-    """
-    try:
-        # Determine the target folder
-        target_folder = os.path.join(UPLOAD_FOLDER, folder_name)
-        
-        # Check if the folder exists
-        if not os.path.exists(target_folder):
-            raise HTTPException(status_code=404, detail=f"Le dossier {folder_name} n'existe pas.")
-        
-        # Generate the summary from the PowerPoint files in the target folder
-        summary_data = aggregate_and_summarize(target_folder)
-        
-        if not summary_data or (not summary_data.get("common_info") and not summary_data.get("upcoming_info")
-                            and not summary_data.get("advancements") and not summary_data.get("small_alerts") 
-                            and not summary_data.get("critical_alerts")):
-            raise HTTPException(status_code=400, detail="Aucun contenu extractible n'a été trouvé dans les PowerPoint.")
-        
-        # Update the template with the summary data
-        output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
-        
-        # Prepare the updates for the table
-        updates = []
-        
-        # Add common information to row 1
-        if summary_data.get("common_info"):
-            updates.append({
-                'row': 1,
-                'col': 0,
-                'text': summary_data["common_info"]
-            })
-        
-        # Add advancements information to row 2, column 0
-        if summary_data.get("advancements") and summary_data["advancements"] != "Aucun avancement significatif à signaler.":
-            updates.append({
-                'row': 2,
-                'col': 0,
-                'text': "🟢 Avancements:\n" + summary_data["advancements"]
-            })
-        
-        # Add small alerts information to row 2, column 1
-        if summary_data.get("small_alerts") and summary_data["small_alerts"] != "Aucune alerte mineure à signaler.":
-            updates.append({
-                'row': 2,
-                'col': 1,
-                'text': "🟡 Alertes mineures:\n" + summary_data["small_alerts"]
-            })
-            
-        # Add critical alerts information to row 2, column 2
-        if summary_data.get("critical_alerts") and summary_data["critical_alerts"] != "Aucune alerte critique à signaler.":
-            updates.append({
-                'row': 2,
-                'col': 2,
-                'text': "🔴 Alertes critiques:\n" + summary_data["critical_alerts"]
-            })
-        
-        # Add upcoming work information to row 3
-        if summary_data.get("upcoming_info"):
-            updates.append({
-                'row': 3,
-                'col': 0,
-                'text': summary_data["upcoming_info"]
-            })
-        
-        # Update the template with all the extracted information
-        summarized_file_path = update_table_multiple_cells(
-            pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
-            slide_index=0,  # first slide
-            table_shape_index=1,  # index of the table
-            updates=updates,
+            table_shape_index=0,  # index of the table
+            project_data=project_data,
             output_path=output_filename
         )
 
         # Return the download URL
         filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"/download/{filename}"}
+        return {"download_url": f"http://localhost:5050/download/{filename}"}
     
     except Exception as e:
         # Log the exception for debugging
-        print(f"Error in summarize_folder: {str(e)}")
+        print(f"Error in summarize_ppt: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 # Testing the function with : 
@@ -339,3 +202,7 @@ async def delete_all_pptx_files(foldername:str):
 
 def run():
     uvicorn.run(app, host="0.0.0.0", port=5050)
+
+
+if __name__ == "__main__":
+    summarize_ppt("669fa53b-649a-4023-8066-4cd86670e88b")

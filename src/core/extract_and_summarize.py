@@ -1,6 +1,8 @@
 import os,sys
 import re
+import json
 from pptx import Presentation
+from langchain_core.prompts import PromptTemplate
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from config import summarize_model
@@ -79,11 +81,13 @@ def extract_common_and_upcoming_info(project_data):
 def aggregate_and_summarize(pptx_folder):
     """
     Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
-    Returns a dictionary with common_info, upcoming_info, advancements, small_alerts, and critical_alerts
-    for updating the PowerPoint template.
+    Uses an LLM to summarize the project information and return it in the specified JSON format.
     
     Parameters:
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
+    
+    Returns:
+      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
     """
     project_data = {}
     file_count = 0
@@ -92,11 +96,10 @@ def aggregate_and_summarize(pptx_folder):
     if not os.path.exists(pptx_folder):
         print(f"Warning: Folder {pptx_folder} does not exist.")
         return {
-            "common_info": "Aucune information disponible - dossier non trouvé.",
-            "upcoming_info": "Aucun événement particulier prévu.",
-            "advancements": "Aucun avancement significatif à signaler.",
-            "small_alerts": "Aucune alerte mineure à signaler.",
-            "critical_alerts": "Aucune alerte critique à signaler."
+            "activities": {},
+            "upcoming_events": {
+                "General": "Aucun événement particulier prévu."
+            }
         }
     
     # Get all PPTX files in the folder
@@ -159,81 +162,150 @@ def aggregate_and_summarize(pptx_folder):
             except Exception as e:
                 print(f"Error processing file {filename}: {str(e)}")
     
-    # If no files were processed, return empty data
+    # If no files were processed, return empty data structure
     if file_count == 0:
         return {
-            "common_info": "Aucune information disponible - aucun fichier PPTX trouvé.",
-            "upcoming_info": "Aucun événement particulier prévu.",
-            "advancements": "Aucun avancement significatif à signaler.",
-            "small_alerts": "Aucune alerte mineure à signaler.",
-            "critical_alerts": "Aucune alerte critique à signaler."
+            "activities": {},
+            "upcoming_events": {
+                "General": "Aucun événement particulier prévu."
+            }
         }
     
-    # Extract common information, upcoming work information, and alerts
-    extracted_data = extract_common_and_upcoming_info(project_data)
+    # Prepare the data to send to the LLM
+    processed_data = {
+        "projects": {},
+        "events": project_data.get("upcoming_events", "")
+    }
     
-    # Summarize common information if it's too long
-    if len(extracted_data["common_info"]) > 2000:  # Arbitrary threshold, adjust as needed
-        prompt = (
-            "Voici des informations agrégées à partir de plusieurs fichiers PowerPoint. "
-            "Votre tâche est de créer un résumé structuré en français qui capture les points clés "
-            "et les idées principales de manière concise et informative.\n\n"
-            f"{extracted_data['common_info']}"
-        )
-        extracted_data["common_info"] = summarize_model.invoke(prompt).content
-        extracted_data["common_info"] = remove_tags_no_keep(extracted_data["common_info"], "<think>", "</think>")
+    # Extract essential information from each project
+    for project_name, project_info in project_data.items():
+        # Skip the "upcoming_events" key as it's not a project
+        if project_name == "upcoming_events":
+            continue
+        
+        processed_data["projects"][project_name] = {
+            "information": project_info.get("information", "").strip(),
+            "advancements": project_info.get("alerts", {}).get("advancements", []),
+            "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
+            "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
+        }
     
-    # Summarize upcoming information if it's too long
-    if len(extracted_data["upcoming_info"]) > 1000:  # Arbitrary threshold, adjust as needed
-        prompt = (
-            "Voici des informations concernant les événements de la semaine à venir. "
-            "Veuillez résumer ces informations de manière concise en français, en conservant "
-            "les points essentiels concernant les prochaines étapes et événements.\n\n"
-            f"{extracted_data['upcoming_info']}"
-        )
-        extracted_data["upcoming_info"] = summarize_model.invoke(prompt).content
-        extracted_data["upcoming_info"] = remove_tags_no_keep(extracted_data["upcoming_info"], "<think>", "</think>")
+    # Create a prompt template for the LLM
+    summarization_template = PromptTemplate.from_template("""
+    Tu es un assistant chargé de résumer des informations de projets et de les formater dans un JSON spécifique.
+
+    Voici les données des projets:
+    {project_data}
     
-    # Summarize advancements if there are many
-    if len(extracted_data["advancements"]) > 1000:
-        prompt = (
-            "Voici des informations concernant les avancements de différents projets. "
-            "Veuillez résumer ces avancements de manière concise en français, en mettant en avant "
-            "les progrès les plus significatifs.\n\n"
-            f"{extracted_data['advancements']}"
-        )
-        extracted_data["advancements"] = summarize_model.invoke(prompt).content
-        extracted_data["advancements"] = remove_tags_no_keep(extracted_data["advancements"], "<think>", "</think>")
+    Voici les événements à venir:
+    {events_data}
+
+    Crée un résumé concis pour chaque projet et organise les informations selon le format JSON suivant:
+    ```json
+    {{
+      "activities": {{
+        "Nom du Projet": {{
+          "summary": "Résumé concis des informations principales du projet en une ou deux phrases",
+          "alerts": {{
+            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
+            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
+            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
+          }}
+        }},
+        // Autres projets...
+      }},
+      "upcoming_events": {{
+        "Catégorie1": "Description des événements à venir pour cette catégorie",
+        "Catégorie2": "Description des événements à venir pour cette catégorie",
+        // Autres catégories...
+      }}
+    }}
+    ```
+
+    Assure-toi de:
+    1. Créer un résumé synthétique et informatif pour chaque projet
+    2. Conserver les informations essentielles des alertes (advancements, small_alerts, critical_alerts)
+    3. Organiser les événements à venir par catégories pertinentes (ex: Cybersecurity, UX/UI Design, Consulting)
+    4. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
+    5. Assure toi que tout soit en Français.
+
+    Les alertes ne doivent contenir que les points vraiment importants, pas besoin de tout inclure.
+    """)
     
-    # Summarize small alerts if there are many
-    if len(extracted_data["small_alerts"]) > 1000:
-        prompt = (
-            "Voici des informations concernant les alertes mineures de différents projets. "
-            "Veuillez résumer ces alertes de manière concise en français, en conservant "
-            "les informations essentielles sur les points à surveiller.\n\n"
-            f"{extracted_data['small_alerts']}"
-        )
-        extracted_data["small_alerts"] = summarize_model.invoke(prompt).content
-        extracted_data["small_alerts"] = remove_tags_no_keep(extracted_data["small_alerts"], "<think>", "</think>")
+    # Prepare the inputs for the prompt
+    prompt_inputs = {
+        "project_data": json.dumps(processed_data["projects"], indent=2, ensure_ascii=True),
+        "events_data": processed_data["events"]
+    }
     
-    # Summarize critical alerts if there are many
-    if len(extracted_data["critical_alerts"]) > 1000:
-        prompt = (
-            "Voici des informations concernant les alertes critiques de différents projets. "
-            "Veuillez résumer ces alertes de manière concise en français, en mettant en évidence "
-            "les problèmes les plus urgents qui nécessitent une attention immédiate.\n\n"
-            f"{extracted_data['critical_alerts']}"
-        )
-        extracted_data["critical_alerts"] = summarize_model.invoke(prompt).content
-        extracted_data["critical_alerts"] = remove_tags_no_keep(extracted_data["critical_alerts"], "<think>", "</think>")
+    # Generate the prompt
+    prompt = summarization_template.format(**prompt_inputs)
     
-    return extracted_data
+    # Call the LLM to generate the summary in JSON format
+    try:
+        llm_response = summarize_model.invoke(prompt)
+        # Extract the JSON part from the response
+        llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = llm_response
+        
+        # Clean the JSON string and parse it
+        json_str = json_str.strip()
+        result = json.loads(json_str)
+        
+        # Ensure the expected structure exists
+        if "activities" not in result:
+            result["activities"] = {}
+        if "upcoming_events" not in result:
+            result["upcoming_events"] = {"General": "Aucun événement particulier prévu."}
+        
+        return result
+        
+    except Exception as e:
+        print(f"Error during LLM summarization: {str(e)}")
+        # Create a basic structure with the raw data as fallback
+        result = {
+            "activities": {},
+            "upcoming_events": {}
+        }
+        
+        # Process upcoming events
+        upcoming_texts = project_data.get("upcoming_events", "")
+        if upcoming_texts:
+            # Try to identify categories in the text
+            categories = re.findall(r"([A-Za-z0-9/]+):\s*([^:]+?)(?=\n[A-Za-z0-9/]+:|$)", upcoming_texts, re.DOTALL)
+            
+            if categories:
+                for category, text in categories:
+                    result["upcoming_events"][category.strip()] = text.strip()
+            else:
+                result["upcoming_events"]["General"] = upcoming_texts.strip()
+        else:
+            result["upcoming_events"]["General"] = "Aucun événement particulier prévu."
+        
+        # Process projects without LLM summarization
+        for project_name, project_info in project_data.items():
+            if project_name == "upcoming_events":
+                continue
+                
+            summary = project_info.get("information", "").strip()
+            
+            result["activities"][project_name] = {
+                "summary": summary if summary else "Aucune information disponible.",
+                "alerts": {
+                    "advancements": project_info.get("alerts", {}).get("advancements", []),
+                    "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
+                    "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
+                }
+            }
+        
+        return result
 
 if __name__ == "__main__":
     folder = "pptx_folder"  # Update with your actual folder path
     result = aggregate_and_summarize(folder)
-    print("Common Info:", result["common_info"])
-    print("Upcoming Info:", result["upcoming_info"])
-    print("Advancements:", result["advancements"])
-    print("Small Alerts:", result["small_alerts"])
-    print("Critical Alerts:", result["critical_alerts"])
+    print("Activities:", result["activities"])
+    print("Upcoming Events:", result["upcoming_events"])

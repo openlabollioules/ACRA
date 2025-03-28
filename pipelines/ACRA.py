@@ -1,9 +1,13 @@
 import json
 import os
+import sys
 import shutil
 import requests
 from typing import List, Union, Generator, Iterator
 from langchain_ollama import  OllamaLLM
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
+
+from OLLibrary.utils.text_service import remove_tags_keep
 
 
 
@@ -46,30 +50,6 @@ class Pipeline:
         response = requests.post(url, data=data, files=files)
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
-    def summarize_presentation(self, filename, folder_name=None):
-        """
-        Envoie une demande pour résumer un fichier PowerPoint.
-        
-        Args:
-            filename (str): Le nom du fichier à résumer.
-            folder_name (str, optional): Le nom du dossier où se trouve le fichier. Si None, utilise le chat_id.
-        
-        Returns:
-            dict: Les résultats de l'opération de résumé.
-        """
-        if folder_name is None:
-            folder_name = self.chat_id
-            
-        file_path = os.path.join("./pptx_folder", folder_name, filename)
-        
-        if not os.path.exists(file_path):
-            return {"error": f"Le fichier {filename} n'existe pas dans le dossier {folder_name}"}
-        
-        with open(file_path, 'rb') as f:
-            files = {'file': (filename, f)}
-            data = {'folder_name': folder_name}
-            return self.post("acra/", data=data, files=files)
-
     def summarize_folder(self, folder_name=None):
         """
         Envoie une demande pour résumer tous les fichiers PowerPoint dans un dossier.
@@ -83,7 +63,7 @@ class Pipeline:
         if folder_name is None:
             folder_name = self.chat_id
             
-        return self.post(f"acra/summarize_folder/?folder_name={folder_name}")
+        return self.fetch(f"acra/{folder_name}")
 
     def analyze_slide_structure(self, folder_name=None):
         """
@@ -273,50 +253,12 @@ class Pipeline:
 
         # Check for commands anywhere in the message
         if "/summarize" in message:
-            # Check if it's a summarize_folder command
-            if "folder" in message or "dossier" in message:
-                # Summarize all files in the chat_id folder
-                response = self.summarize_folder()
-                if "error" in response:
-                    response = f"Erreur lors de la génération du résumé: {response['error']}"
-                else:
-                    response = f"Le résumé du dossier a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
+            # No filename provided, summarize all files by default
+            response = self.summarize_folder()
+            if "error" in response:
+                response = f"Erreur lors de la génération du résumé: {response['error']}"
             else:
-                # Try to extract a filename from the message
-                filename = None
-                words = message.split()
-                for i, word in enumerate(words):
-                    if word == "/summarize" and i + 1 < len(words) and not words[i+1].startswith("/"):
-                        filename = words[i+1]
-                        break
-                
-                # If a filename was provided and it exists in the folder
-                if filename:
-                    # Get list of files in the folder
-                    available_files = self.get_files_in_folder()
-                    
-                    # Find a match for the provided filename (partial match)
-                    matching_files = [f for f in available_files if filename.lower() in f.lower()]
-                    
-                    if matching_files:
-                        # Use the first matching file
-                        file_to_summarize = matching_files[0]
-                        response = self.summarize_presentation(file_to_summarize)
-                        if "error" in response:
-                            response = f"Erreur lors de la génération du résumé: {response['error']}"
-                        else:
-                            response = f"Le résumé du fichier '{file_to_summarize}' a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
-                    else:
-                        # No matching file found
-                        available_files_msg = "\n- " + "\n- ".join(available_files) if available_files else " (aucun fichier disponible)"
-                        response = f"Aucun fichier ne correspond à '{filename}'. Fichiers disponibles: {available_files_msg}"
-                else:
-                    # No filename provided, summarize all files by default
-                    response = self.summarize_folder()
-                    if "error" in response:
-                        response = f"Erreur lors de la génération du résumé: {response['error']}"
-                    else:
-                        response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
+                response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
             
             self.last_response = response
             return response
@@ -367,8 +309,8 @@ class Pipeline:
         if isinstance(response, dict) and "choices" in response:
             for choice in response["choices"]:
                 if "message" in choice and "reasoning" in choice["message"]:
-                    reasoning = choice["message"]["reasoning"]
-                    choice["message"]["content"] = f"<think>{reasoning}</think>\n{choice['message']['content']}"
+                    reasoning = choice["message"]["reasoning"] + "\n"
+                    choice["message"]["content"] = f"{reasoning}{choice['message']['content']}"
             final_response = "\n".join([choice["message"]["content"] for choice in response["choices"]])
         else:
             final_response = response  # si c'est simplement une chaîne
