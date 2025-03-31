@@ -288,8 +288,10 @@ class Pipeline:
             if "error" in response:
                 response = f"Erreur lors de la génération du résumé: {response['error']}"
             else:
-                response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: {response.get('download_url', 'Non disponible')}"
+                response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
             
+            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
             self.last_response = response
             return
         

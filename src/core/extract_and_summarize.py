@@ -5,7 +5,10 @@ from pptx import Presentation
 from langchain_core.prompts import PromptTemplate
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from config import summarize_model
+
+from langchain_ollama import OllamaLLM
+summarize_model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
+
 from analist import extract_projects_from_presentation
 from OLLibrary.utils.text_service import remove_tags_no_keep
 
