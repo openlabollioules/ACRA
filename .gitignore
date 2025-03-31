@@ -6,6 +6,7 @@ templates/
 *.pyo
 *.pyd
 
+pptx_folder/
 venv/
 .env
 .idea/
@@ -25,7 +26,7 @@ models/
 *.h5
 *.pt
 *.ckpt
-
+temp.txt
 audiofiles/
 transcription_archives/
 output/
