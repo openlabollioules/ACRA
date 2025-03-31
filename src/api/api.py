@@ -75,7 +75,7 @@ async def summarize_ppt(folder_name: str):
     
     except Exception as e:
         # Log the exception for debugging
-        print(f"Error in summarize_ppt: {str(e)}")
+        print(f"Error in summarize_folder: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 # Testing the function with : 
