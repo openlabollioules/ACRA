@@ -2,12 +2,12 @@ import os,sys
 import shutil
 import uvicorn
 from pptx import presentation
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Query
 from fastapi.responses import FileResponse  
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
-from services import update_table_cell
+from services import update_table_cell, update_table_multiple_cells, update_table_with_project_data
 from core import aggregate_and_summarize
 
 # starting Fast API 
@@ -17,58 +17,65 @@ UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
-@app.post("/acra/")
-async def summarize_ppt(file: UploadFile = File(...)):
+@app.get("/acra/{folder_name}")
+async def summarize_ppt(folder_name: str):
     """
-    Summarizes the content of an uploaded PowerPoint file and updates a template PowerPoint file with the summary.
+    Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
+    The PowerPoint will be structured with 3 columns:
+      - Column 1: Project names (each project in a separate row)
+      - Column 2: Project information with colored text:
+          * Black: Common information
+          * Green: Advancements
+          * Orange: Small alerts
+          * Red: Critical alerts
+      - Column 3: Upcoming events (all in one row)
 
     Args:
-        file (UploadFile): The uploaded PowerPoint file to be summarized.
+        folder_name (str): The name of the folder containing PowerPoint files to analyze.
 
     Returns:
         dict: A dictionary containing the download URL of the updated PowerPoint file.
 
     Raises:
-        HTTPException: If there's an error processing the PowerPoint file.
+        HTTPException: If there's an error processing the PowerPoint files.
     """
     try:
+        # Determine the target folder
+        target_folder = UPLOAD_FOLDER
+        if folder_name:
+            target_folder = os.path.join(UPLOAD_FOLDER, folder_name)
+        
         # Ensure the upload directory exists
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        os.makedirs(target_folder, exist_ok=True)
         
-        # Save the uploaded file
-        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Generate the summary from the PowerPoint files in the target folder
+        project_data = aggregate_and_summarize(target_folder)
         
-        # Generate the summary from the PowerPoint files in the upload folder
-        summary_text = aggregate_and_summarize(UPLOAD_FOLDER)
+        # Check if we have any data to show
+        if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
+            raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier.")
         
-        if not summary_text:
-            raise HTTPException(status_code=400, detail="Le PowerPoint est vide ou n'a pas de texte extractible.")
-        
-        # Update the template with the summary text
+        # Set the output filename
         output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
-        summarized_file_path = update_table_cell(
+        if folder_name:
+            output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
+        
+        # Update the template with the project data using the new format
+        summarized_file_path = update_table_with_project_data(
             pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
             slide_index=0,  # first slide
-            table_shape_index=1,  # index of the table
-            row=1,  # Write inside the row 1 of the table (title area in row: 0,2,4)
-            col=0, 
-            new_text=summary_text, 
+            table_shape_index=0,  # index of the table
+            project_data=project_data,
             output_path=output_filename
         )
 
-        # Clean up the upload folder - safely remove files first
-        for filename in os.listdir(UPLOAD_FOLDER):
-            file_to_remove = os.path.join(UPLOAD_FOLDER, filename)
-            if os.path.isfile(file_to_remove):
-                os.remove(file_to_remove)
-        
-        return {"download_url": f"/download/{summarized_file_path}"}
+        # Return the download URL
+        filename = os.path.basename(summarized_file_path)
+        return {"download_url": f"http://localhost:5050/download/{filename}"}
     
     except Exception as e:
         # Log the exception for debugging
-        print(f"Error in summarize_ppt: {str(e)}")
+        print(f"Error in summarize_folder: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 # Testing the function with : 
@@ -100,16 +107,13 @@ async def get_slide_structure(foldername: str):
     for filename in pptx_files:
         file_path = os.path.join(folder_path, filename)
         
-        try:
-            slides_data = analyze_presentation(file_path)  # Fonction d'analyse de la structure basique
-            
+        try:            
             # Extraire les données sur les projets
             project_data = extract_projects_from_presentation(file_path)
             
             # Ajouter les deux ensembles de données au résultat
             results.append({
                 "filename": filename, 
-                "slide data": slides_data,
                 "project_data": project_data
             })
         except Exception as e:
@@ -198,3 +202,7 @@ async def delete_all_pptx_files(foldername:str):
 
 def run():
     uvicorn.run(app, host="0.0.0.0", port=5050)
+
+
+if __name__ == "__main__":
+    summarize_ppt("669fa53b-649a-4023-8066-4cd86670e88b")

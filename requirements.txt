@@ -1,5 +1,6 @@
 python-pptx>=0.6.21
 langchain-openai
+langchain-core>=0.1.0
 fastapi>=0.68.0
 python-multipart>=0.0.5
 uvicorn

@@ -6,28 +6,55 @@ from typing import Dict, List, Tuple, Optional
 
 def is_underlined(run):
     """
-    Check if a text run is both bold and underlined.
+    Check if a text run is underlined.
     """
-    if not hasattr(run, 'font'):
-        return False
+    # Check if run has font attribute directly
+    if hasattr(run, 'font') and hasattr(run.font, 'underline'):
+        return run.font.underline
     
-    # Check if the run is underlined
-    return run.font.underline
+    # Check if run has parent with font attribute
+    if hasattr(run, '_parent') and hasattr(run._parent, 'font') and hasattr(run._parent.font, 'underline'):
+        return run._parent.font.underline
+    
+    return False
+
+def is_bold(run):
+    """
+    Check if a text run is bold.
+    """
+    # Check if run has font attribute directly
+    if hasattr(run, 'font'):
+        # Check for bold in font name or bold attribute
+        if (hasattr(run.font, 'name') and run.font.name and "bold" in run.font.name.lower()) or \
+           (hasattr(run.font, 'bold') and run.font.bold):
+            return True
+    
+    # Check if run has parent with font attribute
+    if hasattr(run, '_parent') and hasattr(run._parent, 'font'):
+        # Check for bold in parent font name or bold attribute
+        if (hasattr(run._parent.font, 'name') and run._parent.font.name and "bold" in run._parent.font.name.lower()) or \
+           (hasattr(run._parent.font, 'bold') and run._parent.font.bold):
+            return True
+    
+    return False
 
 def get_rgb_color(run):
     """
     Get the RGB color of a text run.
     Returns tuple (R, G, B) or None if color is not accessible.
     """
-    if not hasattr(run, 'font') or run.font.color is None:
-        return None
-    try:
-        rgb = run.font.color.rgb
-        if rgb is None:
-            return None
-        return (rgb[0], rgb[1], rgb[2])
-    except AttributeError:
-        return None
+    # Try to get color from run's font
+    if hasattr(run, 'font') and hasattr(run.font, 'color') and run.font.color is not None:
+        if hasattr(run.font.color, 'rgb') and run.font.color.rgb is not None:
+            return tuple(run.font.color.rgb)
+    
+    # Try to get color from run's parent font
+    if hasattr(run, '_parent') and hasattr(run._parent, 'font') and \
+       hasattr(run._parent.font, 'color') and run._parent.font.color is not None:
+        if hasattr(run._parent.font.color, 'rgb') and run._parent.font.color.rgb is not None:
+            return tuple(run._parent.font.color.rgb)
+    
+    return None
 
 def identify_color_type(color_tuple: Tuple[int, int, int]) -> str:
     """
@@ -51,9 +78,24 @@ def identify_color_type(color_tuple: Tuple[int, int, int]) -> str:
     else:
         return "normal"
 
+def extract_title_from_slide(slide) -> str:
+    """
+    Extract title from a text field in the slide.
+    Returns the title text.
+    """
+    for shape in slide.shapes:
+        if hasattr(shape, 'text_frame') and shape.text_frame:
+            # Assuming the first text field with content is the title
+            if shape.text_frame.text.strip():
+                return shape.text_frame.text.strip()
+    return "Untitled"
+
 def extract_table_data_from_slide(slide) -> List[Dict]:
     """
-    Extract table data from a slide, focusing on tables with information fields.
+    Extract table data from a slide, focusing on tables with 3 columns:
+    1. Project name
+    2. Project information
+    3. Upcoming events
     Returns a list of rows with text and formatting information.
     """
     results = []
@@ -62,16 +104,31 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
         if shape.has_table:
             table = shape.table
             
+            # Verify that we have the expected table structure - at least 3 columns
+            if len(table.columns) < 3:
+                print(f"Warning: Table does not have 3 columns (found {len(table.columns)}). Skipping.")
+                continue
+            
             # Process each row in the table
-            for row in table.rows:
+            for row_idx, row in enumerate(table.rows):
+                # Skip header row if it exists (optional)
+                # You can uncomment this if your table has a header row to skip
+                # if row_idx == 0:
+                #     continue
+                
                 row_data = []
                 
-                # Process each cell in the row
-                for cell in row.cells:
+                # We only care about the 3 columns we expect - but avoid slicing
+                for col_idx, cell in enumerate(row.cells):
+                    # Only process the first 3 columns
+                    if col_idx >= 3:
+                        break
+                        
                     if cell.text_frame:
                         cell_data = {
                             "text": "",
-                            "paragraphs": []
+                            "paragraphs": [],
+                            "column_index": col_idx  # Track which column this is
                         }
                         
                         # Process each paragraph in the cell
@@ -84,14 +141,12 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                             # Process each run in the paragraph
                             for run in paragraph.runs:
                                 run_text = run.text
-                                is_text_underlined = is_underlined(run)
                                 color = get_rgb_color(run)
                                 color_type = identify_color_type(color)
                                 
                                 para_data["text"] += run_text
                                 para_data["runs"].append({
                                     "text": run_text,
-                                    "bold_and_underlined": is_text_underlined,
                                     "color": color,
                                     "color_type": color_type
                                 })
@@ -102,72 +157,88 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                         cell_data["text"] = cell_data["text"].strip()
                         row_data.append(cell_data)
                     else:
-                        row_data.append({"text": "", "paragraphs": []})
+                        row_data.append({"text": "", "paragraphs": [], "column_index": col_idx})
                 
-                results.append(row_data)
+                # Only add rows that have some content
+                if any(cell.get("text", "").strip() for cell in row_data):
+                    results.append(row_data)
     
     return results
 
-def extract_projects_from_table_data(table_data: List[Dict]) -> Dict[str, Dict]:
+def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict[str, Dict]:
     """
     Extract project information from processed table data.
+    Assuming the table has 3 columns:
+    1. Project name (column_index=0)
+    2. Project information with colored text for alerts (column_index=1)
+    3. Upcoming events (column_index=2)
     Returns a dictionary with project names as keys and their information as values.
     """
     projects = {}
-    current_project = None
-    current_info = []
+    upcoming_events = []
+    
+    # Initialize the title as the main key - use "activities" as the standard key
+    projects["activities"] = {}
     
     # Process each row in the table data
     for row in table_data:
-        for cell in row:
-            # Process paragraphs in each cell
-            for paragraph in cell.get("paragraphs", []):
-                # Process runs in each paragraph
-                for i, run in enumerate(paragraph.get("runs", [])):
-                    if run["bold_and_underlined"]:
-                        # If we already have a project, save its information
-                        if current_project:
-                            projects[current_project] = {
-                                "information": "".join(current_info),
-                                "alerts": {
-                                    "advancements": projects.get(current_project, {}).get("alerts", {}).get("advancements", []),
-                                    "small_alerts": projects.get(current_project, {}).get("alerts", {}).get("small_alerts", []),
-                                    "critical_alerts": projects.get(current_project, {}).get("alerts", {}).get("critical_alerts", [])
-                                }
-                            }
-                        
-                        # Start a new project
-                        current_project = run["text"].strip()
-                        current_info = []
-                    elif current_project:
-                        # Add to the current project's information
-                        current_info.append(run["text"])
-                        
-                        # Track alerts by color
-                        if run["color_type"] == "advancement":
-                            projects.setdefault(current_project, {}).setdefault("alerts", {}).setdefault("advancements", []).append(run["text"])
-                        elif run["color_type"] == "small_alert":
-                            projects.setdefault(current_project, {}).setdefault("alerts", {}).setdefault("small_alerts", []).append(run["text"])
-                        elif run["color_type"] == "critical_alert":
-                            projects.setdefault(current_project, {}).setdefault("alerts", {}).setdefault("critical_alerts", []).append(run["text"])
+        # Get cells by column index
+        project_name_cell = next((cell for cell in row if cell.get("column_index") == 0), {})
+        project_info_cell = next((cell for cell in row if cell.get("column_index") == 1), {})
+        events_cell = next((cell for cell in row if cell.get("column_index") == 2), {})
+        
+        # Extract project name from column 0
+        project_name = project_name_cell.get("text", "").strip()
+        if project_name:
+            # Initialize project data if this is a new project
+            if project_name not in projects["activities"]:
+                projects["activities"][project_name] = {
+                    "information": "",
+                    "alerts": {
+                        "advancements": [],
+                        "small_alerts": [],
+                        "critical_alerts": []
+                    }
+                }
+            
+            # Process project information from column 1
+            for paragraph in project_info_cell.get("paragraphs", []):
+                projects["activities"][project_name]["information"] += paragraph.get("text", "") + "\n"
+                
+                # Process runs to extract colored alerts
+                for run in paragraph.get("runs", []):
+                    if run["color_type"] == "advancement":
+                        projects["activities"][project_name]["alerts"]["advancements"].append(run["text"])
+                    elif run["color_type"] == "small_alert":
+                        projects["activities"][project_name]["alerts"]["small_alerts"].append(run["text"])
+                    elif run["color_type"] == "critical_alert":
+                        projects["activities"][project_name]["alerts"]["critical_alerts"].append(run["text"])
+            
+            # Clean up information text
+            projects["activities"][project_name]["information"] = projects["activities"][project_name]["information"].strip()
+        
+        # Process the upcoming events from column 2 (collect from all rows with data)
+        if events_cell.get("text", "").strip() and not events_cell.get("text") in upcoming_events:
+            for paragraph in events_cell.get("paragraphs", []):
+                paragraph_text = paragraph.get("text", "").strip()
+                if paragraph_text and paragraph_text not in upcoming_events:
+                    upcoming_events.append(paragraph_text)
     
-    # Don't forget the last project
-    if current_project and current_info:
-        projects[current_project] = {
-            "information": "".join(current_info),
-            "alerts": {
-                "advancements": projects.get(current_project, {}).get("alerts", {}).get("advancements", []),
-                "small_alerts": projects.get(current_project, {}).get("alerts", {}).get("small_alerts", []),
-                "critical_alerts": projects.get(current_project, {}).get("alerts", {}).get("critical_alerts", [])
-            }
-        }
+    # Add upcoming events to the projects dictionary
+    if upcoming_events:
+        projects["upcoming_events"] = "\n".join(upcoming_events).strip()
+    
+    # Store the title as metadata
+    projects["metadata"] = {
+        "title": title
+    }
     
     return projects
 
 def extract_projects_from_presentation(file_path: str) -> Dict[str, Dict]:
     """
     Extract project information from a PowerPoint presentation.
-    Focuses on the first slide and tables with information fields.
+    Focuses on the first slide with a title and a 3-column table.
     """
     try:
         prs = Presentation(file_path)
@@ -175,8 +246,9 @@ def extract_projects_from_presentation(file_path: str) -> Dict[str, Dict]:
         # Process only the first slide as specified
         if len(prs.slides) > 0:
             slide = prs.slides[0]
+            title = extract_title_from_slide(slide)
             table_data = extract_table_data_from_slide(slide)
-            projects = extract_projects_from_table_data(table_data)
+            projects = extract_projects_from_table_data(table_data, title)
             return projects
         else:
             return {}
