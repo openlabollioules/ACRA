@@ -18,7 +18,7 @@ OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
 @app.get("/acra/{folder_name}")
-async def summarize_ppt(folder_name: str):
+async def summarize_ppt(folder_name: str, additional_info: str = Query(None, description="Additional information or instructions for guiding the summarization process")):
     """
     Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
     The PowerPoint will be structured with 3 columns:
@@ -32,6 +32,7 @@ async def summarize_ppt(folder_name: str):
 
     Args:
         folder_name (str): The name of the folder containing PowerPoint files to analyze.
+        additional_info (str, optional): Additional information or instructions for guiding the summarization process.
 
     Returns:
         dict: A dictionary containing the download URL of the updated PowerPoint file.
@@ -49,7 +50,7 @@ async def summarize_ppt(folder_name: str):
         os.makedirs(target_folder, exist_ok=True)
         
         # Generate the summary from the PowerPoint files in the target folder
-        project_data = aggregate_and_summarize(target_folder)
+        project_data = aggregate_and_summarize(target_folder, additional_info or "")
         
         # Check if we have any data to show
         if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):

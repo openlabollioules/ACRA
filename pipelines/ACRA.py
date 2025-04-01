@@ -51,20 +51,26 @@ class Pipeline:
         response = requests.post(url, data=data, files=files)
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
-    def summarize_folder(self, folder_name=None):
+    def summarize_folder(self, folder_name=None, additional_info=None):
         """
         Envoie une demande pour résumer tous les fichiers PowerPoint dans un dossier.
         
         Args:
             folder_name (str, optional): Le nom du dossier à résumer. Si None, utilise le chat_id.
+            additional_info (str, optional): Informations supplémentaires pour le résumé.
         
         Returns:
             dict: Les résultats de l'opération de résumé.
         """
         if folder_name is None:
             folder_name = self.chat_id
+        
+        # Add additional_info as a query parameter if provided
+        endpoint = f"acra/{folder_name}"
+        if additional_info:
+            endpoint += f"?additional_info={requests.utils.quote(additional_info)}"
             
-        return self.fetch(f"acra/{folder_name}")
+        return self.fetch(endpoint)
 
     def analyze_slide_structure(self, folder_name=None):
         """
@@ -283,8 +289,15 @@ class Pipeline:
 
         # Gestion des commandes spécifiques (/summarize, /structure, /clear)
         if "/summarize" in message:
+            # Extract additional information after the /summarize command
+            additional_info = None
+            if " " in message:
+                command_parts = message.split(" ", 1)
+                if len(command_parts) > 1 and command_parts[1].strip():
+                    additional_info = command_parts[1].strip()
+            
             # No filename provided, summarize all files by default
-            response = self.summarize_folder()
+            response = self.summarize_folder(additional_info=additional_info)
             if "error" in response:
                 response = f"Erreur lors de la génération du résumé: {response['error']}"
             else:
@@ -328,7 +341,7 @@ class Pipeline:
         else:
             # Afficher les commandes disponibles si aucune réponse précédente
             commands = """Les commandes sont les suivantes : \n
-            /summarize --> Résume tous les fichiers pptx envoyé  
+            /summarize [instructions] --> Résume tous les fichiers pptx envoyés. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
             /structure --> Renvoie la structure des fichiers 
             /clear --> Retire tous les fichiers de la conversation
             """
