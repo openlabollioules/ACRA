@@ -1,6 +1,7 @@
 import os,sys
 import shutil
 import uvicorn
+import uuid
 from pptx import presentation
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Query
 from fastapi.responses import FileResponse  
@@ -56,10 +57,15 @@ async def summarize_ppt(folder_name: str, additional_info: str = Query(None, des
         if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
             raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier.")
         
-        # Set the output filename
-        output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
-        if folder_name:
-            output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
+        # Generate a unique identifier for this summary
+        unique_id = str(uuid.uuid4())[:8]  # Using first 8 characters of UUID for brevity
+        
+        # Set the output filename with the unique identifier
+        if not folder_name:
+            folder_name = "divers"
+            
+        os.makedirs(os.path.join(OUTPUT_FOLDER, folder_name), exist_ok=True)
+        output_filename = f"{OUTPUT_FOLDER}/{folder_name}/summary_{unique_id}.pptx"
         
         # Update the template with the project data using the new format
         summarized_file_path = update_table_with_project_data(
@@ -72,7 +78,7 @@ async def summarize_ppt(folder_name: str, additional_info: str = Query(None, des
 
         # Return the download URL
         filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"http://localhost:5050/download/{filename}"}
+        return {"download_url": f"http://localhost:5050/download/{folder_name}/{filename}"}
     
     except Exception as e:
         # Log the exception for debugging
@@ -147,21 +153,25 @@ async def get_slide_structure_wcolor(filename: str):
 
 # Testing the function with : 
 #  curl -OJ http://localhost:5050/download/TEST_FILE.pptx
-@app.get("/download/{filename}")
-async def download_file(filename: str):
+@app.get("/download/{folder_name}/{filename}")
+async def download_file(folder_name: str, filename: str):
     """
-    Download a file from the server.
-    This endpoint allows clients to download a file from the server by specifying the filename in the URL path.
+    Download a file from a specific folder on the server.
+    This endpoint allows clients to download a file from a specific folder by specifying the folder name and filename in the URL path.
+    
     Args:
+        folder_name (str): The name of the folder containing the file.
         filename (str): The name of the file to be downloaded.
+        
     Returns:
         FileResponse: A response containing the file to be downloaded.
+        
     Raises:
-        HTTPException: If the file does not exist, a 404 status code is returned with a detail message "File Not found.".
+        HTTPException: If the file does not exist, a 404 status code is returned with a detail message.
     """
-    file_path = os.path.join(OUTPUT_FOLDER, filename)
+    file_path = os.path.join(os.getenv("OUTPUT_FOLDER", "OUTPUT"), folder_name, filename)
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File Not found.")
+        raise HTTPException(status_code=404, detail=f"File Not found at path: {file_path}")
     
     return FileResponse(
         path=file_path,

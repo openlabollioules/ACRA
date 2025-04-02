@@ -3,13 +3,16 @@ import os
 import sys
 import shutil
 import requests
+import uuid
 from typing import List, Union, Generator, Iterator, Dict, Any
 from langchain_ollama import  OllamaLLM
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
 
 from OLLibrary.utils.text_service import remove_tags_keep
+import logging
 
-
+# Use a logger to log all informations
+log = logging.getLogger(__name__)
 
 class Pipeline:
 
@@ -32,12 +35,20 @@ class Pipeline:
         self.system_prompt = ""
         self.message_id = 0
 
+        # State tracking
+        self.waiting_for_confirmation = False
+        self.confirmation_command = ""
+        self.confirmation_additional_info = ""
+
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""
         self.last_response = None
         self.system_prompt = ""
         self.file_path_list = []
         self.message_id = 0
+        self.waiting_for_confirmation = False
+        self.confirmation_command = ""
+        self.confirmation_additional_info = ""
 
     def fetch(self, endpoint):
             """Effectue une requête GET synchrone"""
@@ -66,7 +77,7 @@ class Pipeline:
             folder_name = self.chat_id
         
         # Add additional_info as a query parameter if provided
-        endpoint = f"acra/{folder_name}"
+        endpoint = f"ACRA - Pipeline/{folder_name}"
         if additional_info:
             endpoint += f"?additional_info={requests.utils.quote(additional_info)}"
             
@@ -215,7 +226,7 @@ class Pipeline:
         return [f for f in os.listdir(folder_path) if f.lower().endswith(".pptx")]
 
     async def inlet(self, body: dict, user: dict) -> dict:
-        print(f"Received body: {body}")
+        log.info(f"Received body: {body}")
         
         # Get conversation ID from body
         if body.get("metadata", {}).get("chat_id") != None:
@@ -252,6 +263,45 @@ class Pipeline:
         
         return body
 
+    def get_existing_summaries(self, folder_name=None):
+        """
+        Récupère la liste des fichiers de résumé existants pour le chat_id actuel.
+        
+        Args:
+            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
+        
+        Returns:
+            list: Liste des tuples (filename, url) des résumés.
+        """
+        if folder_name is None:
+            folder_name = self.chat_id
+        log.info(f"ACRA - Pipeline: Getting existing summaries for folder: {folder_name}")
+        output_folder = os.getenv("OUTPUT_FOLDER", "OUTPUT")
+        log.info(f"ACRA - Pipeline: Output folder: {output_folder}")
+        summaries = []
+        folder_path = os.path.join(output_folder, folder_name)
+        log.info(f"ACRA - Pipeline: Folder path: {folder_path}")
+        log.info(f"ACRA - Pipeline: Folder exists: {os.path.exists(folder_path)}")
+        os.makedirs(folder_path, exist_ok=True)
+        log.info(f"ACRA - Pipeline: Makedirs: {folder_path}")
+        
+        try:
+            # List all files in the current chat folder
+            files = os.listdir(folder_path)
+            log.info(f"ACRA - Pipeline: All files in directory: {files}")
+            for filename in files:
+                log.info(f"ACRA - Pipeline: Processing file: {filename}")
+                if filename and filename.endswith(".pptx"):
+                    download_url = f"http://localhost:5050/download/{folder_name}/{filename}"
+                    log.info(f"ACRA - Pipeline: Download URL: {download_url}")
+                    summaries.append((filename, download_url))
+            log.info(f"ACRA - Pipeline: Final summaries list: {summaries}")
+        except Exception as e:
+            log.error(f"ACRA - Pipeline - ERROR: Error listing files: {str(e)}")
+            log.error(f"ACRA - Pipeline - ERROR: Current working directory: {os.getcwd()}")
+            log.error(f"ACRA - Pipeline - ERROR: Absolute folder path: {os.path.abspath(folder_path)}")
+        
+        return summaries
 
     def pipe(self, body: dict, user_message: str, model_id: str, messages: List[dict]) -> Generator[str, None, None]:
         """
@@ -274,19 +324,39 @@ class Pipeline:
         - /structure: Analyse la structure des diapositives
         - /clear: Supprime tous les fichiers de la conversation
         """
-        # # Vérifier si c'est une nouvelle conversation en examinant les métadonnées du corps
-        # new_chat_id = body.get("metadata", {}).get("chat_id", "default")
-        # if self.current_chat_id and new_chat_id != self.current_chat_id:
-        #     print(f"New conversation detected in pipe: {new_chat_id} (was: {self.current_chat_id})")
-        #     self.reset_conversation_state()
-        #     self.current_chat_id = new_chat_id
-        #     self.chat_id = new_chat_id
-        # else:
-        #     self.current_chat_id = new_chat_id
-        #     self.chat_id = new_chat_id
         message = user_message.lower()  # Convertir en minuscules pour simplifier la correspondance
         __event_emitter__ = body.get("__event_emitter__")
 
+        # Check if we're waiting for confirmation
+        if self.waiting_for_confirmation:
+            if message in ["yes", "y", "oui", "o"]:
+                self.waiting_for_confirmation = False
+                
+                # If we were waiting for summarize confirmation
+                if self.confirmation_command == "summarize":
+                    # Generate a new summary
+                    response = self.summarize_folder(additional_info=self.confirmation_additional_info)
+                    if "error" in response:
+                        response = f"Erreur lors de la génération du résumé: {response['error']}"
+                    else:
+                        response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+                    
+                    yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                    self.last_response = response
+                    return
+            
+            elif message in ["no", "n", "non"]:
+                self.waiting_for_confirmation = False
+                response = "Génération de résumé annulée."
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            
+            # Reset if we get any other input
+            self.waiting_for_confirmation = False
+        
         # Gestion des commandes spécifiques (/summarize, /structure, /clear)
         if "/summarize" in message:
             # Extract additional information after the /summarize command
@@ -296,17 +366,38 @@ class Pipeline:
                 if len(command_parts) > 1 and command_parts[1].strip():
                     additional_info = command_parts[1].strip()
             
-            # No filename provided, summarize all files by default
-            response = self.summarize_folder(additional_info=additional_info)
-            if "error" in response:
-                response = f"Erreur lors de la génération du résumé: {response['error']}"
-            else:
-                response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+            # Get existing summaries
+            existing_summaries = self.get_existing_summaries()
+            log.info(f"ACRA - Pipeline: Existing summaries: {existing_summaries}")
             
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
-            return
+            if existing_summaries:
+                response = "Voici les résumés existants pour cette conversation:\n\n"
+                for filename, url in existing_summaries:
+                    response += f"- {filename}: \n- {url}\n"
+                
+                response += "\nVoulez-vous générer un nouveau résumé? (Oui/Non)"
+                
+                # Set state to wait for confirmation
+                self.waiting_for_confirmation = True
+                self.confirmation_command = "summarize"
+                self.confirmation_additional_info = additional_info
+                
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            else:
+                # No existing summaries, generate one directly
+                response = self.summarize_folder(additional_info=additional_info)
+                if "error" in response:
+                    response = f"Erreur lors de la génération du résumé: {response['error']}"
+                else:
+                    response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+                
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
         
         elif "/structure" in message:
             response = self.analyze_slide_structure()
@@ -341,7 +432,7 @@ class Pipeline:
         else:
             # Afficher les commandes disponibles si aucune réponse précédente
             commands = """Les commandes sont les suivantes : \n
-            /summarize [instructions] --> Résume tous les fichiers pptx envoyés. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
+            /summarize [instructions] --> Affiche les résumés existants et demande confirmation avant d'en générer un nouveau. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
             /structure --> Renvoie la structure des fichiers 
             /clear --> Retire tous les fichiers de la conversation
             """
