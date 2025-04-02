@@ -77,7 +77,7 @@ class Pipeline:
             folder_name = self.chat_id
         
         # Add additional_info as a query parameter if provided
-        endpoint = f"ACRA - Pipeline/{folder_name}"
+        endpoint = f"acra/{folder_name}"
         if additional_info:
             endpoint += f"?additional_info={requests.utils.quote(additional_info)}"
             
@@ -297,9 +297,9 @@ class Pipeline:
                     summaries.append((filename, download_url))
             log.info(f"ACRA - Pipeline: Final summaries list: {summaries}")
         except Exception as e:
-            log.error(f"ACRA - Pipeline - ERROR: Error listing files: {str(e)}")
-            log.error(f"ACRA - Pipeline - ERROR: Current working directory: {os.getcwd()}")
-            log.error(f"ACRA - Pipeline - ERROR: Absolute folder path: {os.path.abspath(folder_path)}")
+            log.error(f"ACRA - Pipeline: Error listing files: {str(e)}")
+            log.error(f"ACRA - Pipeline: Current working directory: {os.getcwd()}")
+            log.error(f"ACRA - Pipeline: Absolute folder path: {os.path.abspath(folder_path)}")
         
         return summaries
 
@@ -373,7 +373,7 @@ class Pipeline:
             if existing_summaries:
                 response = "Voici les résumés existants pour cette conversation:\n\n"
                 for filename, url in existing_summaries:
-                    response += f"- {filename}: \n- {url}\n"
+                    response += f"- {filename}: {url}\n"
                 
                 response += "\nVoulez-vous générer un nouveau résumé? (Oui/Non)"
                 
