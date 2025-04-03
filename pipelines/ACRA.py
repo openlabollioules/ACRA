@@ -28,9 +28,24 @@ class Pipeline:
 
         self.chat_id = ""
         self.current_chat_id = ""  # To track conversation changes
-
+        self.small_model = OllamaLLM(model="gemma3:latest", base_url="http://host.docker.internal:11434", num_ctx=64000)
         self.system_prompt = ""
         self.message_id = 0
+
+    def generate_report(self, foldername, info):
+        """
+        Génère un rapport à partir du texte fourni en utilisant une requête POST.
+        
+        Args:
+            foldername (str): Le nom du dossier où stocker le rapport
+            info (str): Le texte à analyser pour générer le rapport
+            
+        Returns:
+            dict: Résultat de la requête avec l'URL de téléchargement
+        """
+        url = f"{self.api_url}/generate_text_report/{foldername}"
+        data = {"info": info}
+        return self.post(url, data=json.dumps(data), headers={"Content-Type": "application/json"})
 
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""
@@ -45,10 +60,15 @@ class Pipeline:
             response = requests.get(url)
             return response.json() if response.status_code == 200 else {"error": "Request failed"}
 
-    def post(self, endpoint, data=None, files=None):
+    def post(self, endpoint, data=None, files=None, headers=None):
         """Effectue une requête POST synchrone"""
-        url = f"{self.api_url}/{endpoint}"
-        response = requests.post(url, data=data, files=files)
+        # Si l'endpoint commence par http, on le considère comme une URL complète
+        if endpoint.startswith("http"):
+            url = endpoint
+        else:
+            # Sinon on le préfixe avec l'URL de l'API
+            url = f"{self.api_url}/{endpoint}"
+        response = requests.post(url, data=data, files=files, headers=headers)
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
     def summarize_folder(self, folder_name=None):
@@ -97,76 +117,80 @@ class Pipeline:
             return "Aucun fichier PPTX fourni."
 
         for presentation in presentations["presentations"]:
+            # Informations de base
             filename = presentation.get("filename", "Unknown File")
             total_slides = presentation.get("slide data", {}).get("total_slides", 0)
-
-            result += f"\n📂 **Présentation : {filename}**\n"
-            result += f"📊 **Nombre total de diapositives : {total_slides+1}**\n\n"
-
+            prompt = f"Tu es un assistant spécialisé dans le traitement automatique des noms de fichiers. On te donne un nom de fichier de présentation (PowerPoint) contenant un identifiant unique suivi du titre du document. Ton objectif est d'extraire uniquement le titre du document dans un format propre et lisible pour un humain. Le titre est toujours situé après le dernier underscore (`_`) ou après une chaîne d'identifiants. Supprime l'extension `.pptx` ou toute autre extension. Remplace les underscores (`_`) ou tirets (`-`) par des espaces, et capitalise correctement chaque mot. Exemple : **Nom de fichier :** `dc56be63-37a6-4ed6-9223-50f545028ab4_CRA_SERVICE_UX.pptx`   **Titre extrait :** `Service UX` Donne uniquement le titre extrait (pas d'explication), en une seule ligne. voici le nom du fichier : {filename}"
+            service_name = self.small_model.invoke(prompt)
+            result += f"##  **Présentation :**  CRA {service_name}\n\n"
+            result += f"**Nombre total de diapositives :** {total_slides + 1}\n\n"
+            
+            # Informations globales
+            result += f"### Informations globales {service_name}\n\n\n"
+            temp_global_content = []
+            content = presentation.get("project_data", {})
+            activites = content.get("activities", {})
+            
+            for item in activites:
+                info_text = activites.get(item, {}).get("information", "")
+                # Ajoute l'information en utilisant une liste markdown
+                temp_global_content.append(f"#### **{item} :**  \n  - {info_text}\n\n")
+            
+            result += "\n\n".join(temp_global_content) + "\n\n"
+            result += "---\n\n"
+            
+            # Section Alertes
+            result += f"### Alertes {service_name}\n\n"
+            
             temp_alerts_critical = []
             temp_alerts_warning = []
             temp_alerts_advancements = []
-            temp_global_content = []
-            content = presentation.get("project_data", {})
-            activites = content.get('activities', {})
-            evenements = content.get('upcoming_events', [])
-
-            for item in activites:
-                # Format global content with project name as a heading
-                temp_global_content.append(f"**{item}**:\n{activites.get(item).get('information')}")
-                
-                if activites.get(item).get("alerts"):
-                    alerts = activites.get(item).get("alerts")
-                    
-                    # Format critical alerts
-                    if alerts.get("critical_alerts"):
-                        temp_alerts_critical.append(f"**{item}**:")
-                        for alert in alerts.get("critical_alerts", []):
-                            temp_alerts_critical.append(f"- {alert}")
-                    
-                    # Format small alerts
-                    if alerts.get("small_alerts"):
-                        temp_alerts_warning.append(f"**{item}**:")
-                        for alert in alerts.get("small_alerts", []):
-                            temp_alerts_warning.append(f"- {alert}")
-                    
-                    # Format advancements
-                    if alerts.get("advancements"):
-                        temp_alerts_advancements.append(f"**{item}**:")
-                        for advancement in alerts.get("advancements", []):
-                            temp_alerts_advancements.append(f"- {advancement}")
-
-            # Format global information section
-            result += "**Informations globales:**\n"
-            for info in temp_global_content:
-                result += f"{info}\n\n"
             
-            # Format alerts sections with better styling
+            for item in activites:
+                alerts = activites.get(item, {}).get("alerts", {})
+                
+                # Alertes critiques
+                if alerts.get("critical_alerts"):
+                    alert_lines = "\n".join([f"    - {alert}" for alert in alerts.get("critical_alerts", [])])
+                    temp_alerts_critical.append(f"  - **{item}**:\n{alert_lines}")
+                    
+                # Alertes mineures
+                if alerts.get("small_alerts"):
+                    alert_lines = "\n".join([f"    - {alert}" for alert in alerts.get("small_alerts", [])])
+                    temp_alerts_warning.append(f"  - **{item}**:\n{alert_lines}")
+                    
+                # Avancements
+                if alerts.get("advancements"):
+                    alert_lines = "\n".join([f"    - {advancement}" for advancement in alerts.get("advancements", [])])
+                    temp_alerts_advancements.append(f"  - **{item}**:\n{alert_lines}")
+            
+            # Affichage des alertes critiques
             if temp_alerts_critical:
-                result += "🔴 **Alertes Critiques:**\n"
-                result += "\n".join(temp_alerts_critical) + "\n\n"
+                result += "- **🔴 Alertes Critiques :**\n" + "\n".join(temp_alerts_critical) + "\n\n"
             else:
-                result += "🔴 **Alertes Critiques:** Aucune alerte critique à signaler.\n\n"
-                
+                result += "- **🔴 Alertes Critiques :** Aucune alerte critique à signaler.\n\n"
+            
+            # Affichage des alertes mineures
             if temp_alerts_warning:
-                result += "🟡 **Alertes à surveiller:**\n"
-                result += "\n".join(temp_alerts_warning) + "\n\n"
+                result += "- **🟡 Alertes à surveiller :**\n" + "\n".join(temp_alerts_warning) + "\n\n"
             else:
-                result += "🟡 **Alertes à surveiller:** Aucune alerte mineure à signaler.\n\n"
-                
+                result += "- **🟡 Alertes à surveiller :** Aucune alerte mineure à signaler.\n\n"
+            
+            # Affichage des avancements
             if temp_alerts_advancements:
-                result += "🟢 **Avancements:**\n"
-                result += "\n".join(temp_alerts_advancements) + "\n\n"
+                result += "- **🟢 Avancements :**\n" + "\n".join(temp_alerts_advancements) + "\n\n"
             else:
-                result += "🟢 **Avancements:** Aucun avancement significatif à signaler.\n\n"
-
-            # Format upcoming events section
-            result += "**Evénements des semaines à venir:**\n"
+                result += "- **🟢 Avancements :** Aucun avancement significatif à signaler.\n\n"
+            
+            
+            # Événements à venir
+            result += f"### Événements des semaines à venir {service_name} \n\n"
+            evenements = content.get("upcoming_events", [])
+            
             if evenements:
-                result += f"{evenements}\n\n"
+                result += f"\n\n{evenements}\n\n"
             else:
                 result += "Aucun événement particulier prévu pour les semaines à venir.\n\n"
-            
             result += "-" * 50 + "\n"  # Séparateur entre fichiers
 
         return result.strip()
@@ -267,6 +291,7 @@ class Pipeline:
         - /summarize: Tente de résumer les fichiers PPTX
         - /structure: Analyse la structure des diapositives
         - /clear: Supprime tous les fichiers de la conversation
+        - /generate_text_report: Génère un rapport à partir du texte fourni
         """
         # # Vérifier si c'est une nouvelle conversation en examinant les métadonnées du corps
         # new_chat_id = body.get("metadata", {}).get("chat_id", "default")
@@ -288,7 +313,12 @@ class Pipeline:
             if "error" in response:
                 response = f"Erreur lors de la génération du résumé: {response['error']}"
             else:
-                response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+                introduction_prompt = f"""Tu es un assistant qui va générer une introduction pour un enssemble de fichiers PPTX je veux juste une description globale des fichiers impliqués dans le message de 
+                l'utilisateur pas de cas par cas et sourtout quelque chose de consit et renvoie uniquement l'introduction (pas d'explication) si tu vois une information importante ou une alerte critique, tu dois 
+                la signaler dans l'introduction. Voici le contenu de tous les fichiers : {self.system_prompt} Tu dois renvoyer uniquement l'introduction (pas d'explication).
+                """
+                introduction = self.small_model.invoke(introduction_prompt)
+                response = f"{introduction}\n\n Le résumé de tous les fichiers a été généré avec succès.\n\n  ### URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
             
             yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
             yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
@@ -301,6 +331,26 @@ class Pipeline:
                 response = f"Erreur lors de l'analyse de la structure: {response['error']}"
             else:
                 response = self.format_all_slide_data(response)
+            if __event_emitter__:
+                __event_emitter__({"type": "content", "content": response})
+            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.last_response = response
+            return
+        
+        elif "/generate" in message:
+            # Extraire le texte après la commande
+            text_content = user_message.replace("/generate", "").strip()
+            if not text_content:
+                response = "Veuillez fournir du texte après la commande /generate pour générer un rapport."
+            else:
+                # On utilise la méthode generate_report qui maintenant fait un POST avec le texte dans le body
+                response = self.generate_report(self.chat_id, text_content)
+                if "error" in response:
+                    response = f"Erreur lors de la génération du rapport: {response['error']}"
+                else:
+                    response = f"Le rapport a été généré avec succès à partir du texte fourni.\n\n### URL de téléchargement:\n{response.get('download_url', 'Non disponible')}"
+            
             if __event_emitter__:
                 __event_emitter__({"type": "content", "content": response})
             yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
@@ -331,6 +381,7 @@ class Pipeline:
             /summarize --> Résume tous les fichiers pptx envoyé  
             /structure --> Renvoie la structure des fichiers 
             /clear --> Retire tous les fichiers de la conversation
+            /generate [texte] --> Génère un rapport à partir du texte fourni
             """
             self.last_response = commands
             yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"

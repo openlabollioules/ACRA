@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
 from services import update_table_cell, update_table_multiple_cells, update_table_with_project_data
-from core import aggregate_and_summarize
+from core import aggregate_and_summarize, Generate_pptx_from_text
 
 # starting Fast API 
 app = FastAPI() 
@@ -199,6 +199,54 @@ async def delete_all_pptx_files(foldername:str):
 
     return {"message": f"{len(files)} fichiers supprimés avec succès."}
 
+@app.post("/generate_text_report/{foldername}")
+async def generate_text_report(foldername: str, text_data: dict):
+    """Takes the ACRA Info and generates a PPTX from text files, following the template"""
+    try:
+        # Extract text info from request body
+        info = text_data.get("info", "")
+        
+        # Determine the target folder
+        target_folder = UPLOAD_FOLDER
+        if foldername:
+            target_folder = os.path.join(UPLOAD_FOLDER, foldername)
+        
+        # Ensure the upload directory exists
+        os.makedirs(target_folder, exist_ok=True)
+        
+        # Generate the summary using our updated function with the text information
+        project_data = Generate_pptx_from_text(target_folder, info)
+        
+        # Check if we have any data to show
+        if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
+            raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite du texte fourni.")
+        
+        # Set the output filename
+        output_filename = f"{OUTPUT_FOLDER}/updated_presentation_from_text.pptx"
+        if foldername:
+            output_filename = f"{OUTPUT_FOLDER}/{foldername}_text_summary.pptx"
+        
+        # Update the template with the project data using the new format
+        generated_pptx = update_table_with_project_data(
+            pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
+            slide_index=0,  # first slide
+            table_shape_index=0,  # index of the table
+            project_data=project_data,
+            output_path=output_filename
+        )
+
+        # Return the download URL
+        filename = os.path.basename(generated_pptx)
+        # TODO: add a way to download a file from the UPLOAD_FOLDER
+        # copy the file to the upload folder
+        shutil.copy(output_filename, os.path.join(target_folder, os.path.basename(output_filename)))
+
+        return {"download_url": f"http://localhost:5050/download/{filename}"}
+    
+    except Exception as e:
+        # Log the exception for debugging
+        print(f"Error in generate_text_report: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 def run():
     uvicorn.run(app, host="0.0.0.0", port=5050)
