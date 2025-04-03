@@ -10,12 +10,18 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
 from services import update_table_cell, update_table_multiple_cells, update_table_with_project_data
 from core import aggregate_and_summarize
+from OLLibrary.utils.log_service import setup_logging, get_logger
+
+# Set up logging
+setup_logging(app_name="ACRA_API")
+logger = get_logger(__name__)
 
 # starting Fast API 
 app = FastAPI() 
 load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
+logger.info(f"API starting with UPLOAD_FOLDER={UPLOAD_FOLDER}, OUTPUT_FOLDER={OUTPUT_FOLDER}")
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
 @app.get("/acra/{folder_name}")
@@ -41,6 +47,7 @@ async def summarize_ppt(folder_name: str, additional_info: str = Query(None, des
     Raises:
         HTTPException: If there's an error processing the PowerPoint files.
     """
+    logger.info(f"Summarizing PPT for folder: {folder_name}")
     try:
         # Determine the target folder
         target_folder = UPLOAD_FOLDER
@@ -51,10 +58,12 @@ async def summarize_ppt(folder_name: str, additional_info: str = Query(None, des
         os.makedirs(target_folder, exist_ok=True)
         
         # Generate the summary from the PowerPoint files in the target folder
+        logger.info(f"Generating summary for files in: {target_folder}")
         project_data = aggregate_and_summarize(target_folder, additional_info or "")
         
         # Check if we have any data to show
         if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
+            logger.warning(f"No data found in PowerPoint files for folder: {folder_name}")
             raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier.")
         
         # Generate a unique identifier for this summary
@@ -68,6 +77,7 @@ async def summarize_ppt(folder_name: str, additional_info: str = Query(None, des
         output_filename = f"{OUTPUT_FOLDER}/{folder_name}/summary_{unique_id}.pptx"
         
         # Update the template with the project data using the new format
+        logger.info(f"Updating template with project data, output: {output_filename}")
         summarized_file_path = update_table_with_project_data(
             pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
             slide_index=0,  # first slide
@@ -78,11 +88,13 @@ async def summarize_ppt(folder_name: str, additional_info: str = Query(None, des
 
         # Return the download URL
         filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"http://localhost:5050/download/{folder_name}/{filename}"}
+        download_url = f"http://localhost:5050/download/{folder_name}/{filename}"
+        logger.info(f"Summary generated successfully: {download_url}")
+        return {"download_url": download_url}
     
     except Exception as e:
         # Log the exception for debugging
-        print(f"Error in summarize_folder: {str(e)}")
+        logger.error(f"Error in summarize_folder: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 # Testing the function with : 
@@ -182,7 +194,10 @@ async def download_file(folder_name: str, filename: str):
 @app.delete("/delete_all_pptx_files/{foldername}")
 async def delete_all_pptx_files(foldername:str):
     """
-    Supprime tous les fichiers du dossier pptx_folder.
+    Supprime tous les fichiers du dossier UPLOAD_FOLDER/foldername.
+
+    Args:
+        foldername (str): Le nom du dossier dans UPLOAD_FOLDER à vider.
 
     Returns:
         dict: Un message confirmant la suppression des fichiers.
@@ -190,26 +205,65 @@ async def delete_all_pptx_files(foldername:str):
     Raises:
         HTTPException: Si le dossier n'existe pas.
     """
-    pptx_folder = os.path.join(UPLOAD_FOLDER, foldername)
-    if not os.path.exists(pptx_folder):
-        raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
+    pptx_folder_path = os.path.join(UPLOAD_FOLDER, foldername)
+    
+    if not os.path.exists(pptx_folder_path):
+        return {"message": f"Le dossier {pptx_folder_path} n'existe pas."}
 
     # Liste des fichiers dans le dossier
-    files = os.listdir(pptx_folder)
+    files = [f for f in os.listdir(pptx_folder_path) if os.path.isfile(os.path.join(pptx_folder_path, f))]
     
     if not files:
         return {"message": "Aucun fichier à supprimer."}
 
     # Suppression des fichiers un par un
+    deleted_count = 0
     for file in files:
-        file_path = os.path.join(pptx_folder, file)
+        file_path = os.path.join(pptx_folder_path, file)
         try:
             os.remove(file_path)
+            deleted_count += 1
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression de {file}: {str(e)}")
 
-    return {"message": f"{len(files)} fichiers supprimés avec succès."}
+    return {"message": f"{deleted_count} fichiers supprimés avec succès du dossier {pptx_folder_path}."}
 
+@app.delete("/delete_output_files/{foldername}")
+async def delete_output_files(foldername:str):
+    """
+    Supprime tous les fichiers du dossier OUTPUT/foldername.
+
+    Args:
+        foldername (str): Le nom du dossier dans OUTPUT à vider.
+
+    Returns:
+        dict: Un message confirmant la suppression des fichiers.
+    
+    Raises:
+        HTTPException: Si le dossier n'existe pas.
+    """
+    output_folder_path = os.path.join(OUTPUT_FOLDER, foldername)
+    
+    if not os.path.exists(output_folder_path):
+        return {"message": f"Le dossier {output_folder_path} n'existe pas."}
+
+    # Liste des fichiers dans le dossier OUTPUT
+    files = [f for f in os.listdir(output_folder_path) if os.path.isfile(os.path.join(output_folder_path, f))]
+    
+    if not files:
+        return {"message": "Aucun fichier à supprimer dans le dossier OUTPUT."}
+
+    # Suppression des fichiers un par un
+    deleted_count = 0
+    for file in files:
+        file_path = os.path.join(output_folder_path, file)
+        try:
+            os.remove(file_path)
+            deleted_count += 1
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression de {file}: {str(e)}")
+
+    return {"message": f"{deleted_count} fichiers supprimés avec succès du dossier OUTPUT/{foldername}."}
 
 def run():
     uvicorn.run(app, host="0.0.0.0", port=5050)

@@ -9,15 +9,20 @@ from langchain_ollama import  OllamaLLM
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
 
 from OLLibrary.utils.text_service import remove_tags_keep
+from OLLibrary.utils.log_service import setup_logging, get_logger
+from services import cleanup_orphaned_folders
 import logging
 
-# Use a logger to log all informations
-log = logging.getLogger(__name__)
+# Set up the main application logger
+setup_logging(app_name="ACRA_Pipeline")
+
+# Use a specific logger for this module
+log = get_logger(__name__)
 
 class Pipeline:
 
     def __init__(self):
-
+        log.info("Initializing ACRA Pipeline")
         self.last_response = None
 
         # self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
@@ -39,9 +44,11 @@ class Pipeline:
         self.waiting_for_confirmation = False
         self.confirmation_command = ""
         self.confirmation_additional_info = ""
+        log.info("ACRA Pipeline initialized successfully")
 
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""
+        log.info(f"Resetting conversation state for chat_id: {self.chat_id}")
         self.last_response = None
         self.system_prompt = ""
         self.file_path_list = []
@@ -53,13 +60,19 @@ class Pipeline:
     def fetch(self, endpoint):
             """Effectue une requête GET synchrone"""
             url = f"{self.api_url}/{endpoint}"
+            log.debug(f"Fetching from: {url}")
             response = requests.get(url)
+            if response.status_code != 200:
+                log.error(f"API request failed: {response.status_code} - {response.text}")
             return response.json() if response.status_code == 200 else {"error": "Request failed"}
 
     def post(self, endpoint, data=None, files=None):
         """Effectue une requête POST synchrone"""
         url = f"{self.api_url}/{endpoint}"
+        log.debug(f"Posting to: {url}")
         response = requests.post(url, data=data, files=files)
+        if response.status_code != 200:
+            log.error(f"API POST request failed: {response.status_code} - {response.text}")
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
     def summarize_folder(self, folder_name=None, additional_info=None):
@@ -228,12 +241,42 @@ class Pipeline:
     async def inlet(self, body: dict, user: dict) -> dict:
         log.info(f"Received body: {body}")
         
+        # Debug log the current state
+        log.info(f"Current state - self.chat_id: '{self.chat_id}', self.current_chat_id: '{self.current_chat_id}'")
+        
         # Get conversation ID from body
-        if body.get("metadata", {}).get("chat_id") != None:
-            self.chat_id = body.get("metadata", {}).get("chat_id", "default")
-            if not self.current_chat_id:
-                self.current_chat_id = self.chat_id
-
+        new_chat_id = body.get("metadata", {}).get("chat_id", "default")
+        log.info(f"Extracted new_chat_id from metadata: '{new_chat_id}'")
+        
+        # Always compare to current_chat_id, as that's our tracking variable
+        if new_chat_id != self.current_chat_id:
+            log.info(f"CHAT ID CHANGE DETECTED: '{self.current_chat_id}' → '{new_chat_id}'")
+            
+            # Skip initial setup (first conversation)
+            if self.current_chat_id:  # Only run if we had a previous conversation
+                log.info(f"Previous conversation existed, running cleanup...")
+                
+                # Run cleanup for orphaned folders
+                try:
+                    log.info("Running cleanup for orphaned folders...")
+                    cleanup_result = cleanup_orphaned_folders()
+                    log.info(f"Cleanup completed: {cleanup_result}")
+                except Exception as e:
+                    log.error(f"Error running cleanup: {str(e)}", exc_info=True)
+                
+                # Reset conversation state for the new conversation
+                self.reset_conversation_state()
+            else:
+                log.info("First conversation, skipping cleanup")
+            
+            # Update current chat ID tracking
+            self.current_chat_id = new_chat_id
+        else:
+            log.info(f"No chat_id change detected (still '{self.current_chat_id}')")
+        
+        # Always update self.chat_id for use in the rest of the pipeline
+        self.chat_id = new_chat_id
+        
         # Create folder with conversation ID
         conversation_folder = os.path.join("./pptx_folder", self.chat_id)
         os.makedirs(conversation_folder, exist_ok=True)
@@ -323,6 +366,8 @@ class Pipeline:
         - /summarize: Tente de résumer les fichiers PPTX
         - /structure: Analyse la structure des diapositives
         - /clear: Supprime tous les fichiers de la conversation
+        - /cleanup: Exécute manuellement le nettoyage des dossiers orphelins
+        - /debug: Affiche les informations de débogage et exécute manuellement le nettoyage
         """
         message = user_message.lower()  # Convertir en minuscules pour simplifier la correspondance
         __event_emitter__ = body.get("__event_emitter__")
@@ -357,7 +402,7 @@ class Pipeline:
             # Reset if we get any other input
             self.waiting_for_confirmation = False
         
-        # Gestion des commandes spécifiques (/summarize, /structure, /clear)
+        # Gestion des commandes spécifiques
         if "/summarize" in message:
             # Extract additional information after the /summarize command
             additional_info = None
@@ -425,6 +470,94 @@ class Pipeline:
             yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
             self.last_response = response
             return
+            
+        elif "/cleanup" in message:
+            try:
+                cleanup_result = cleanup_orphaned_folders()
+                response = f"Nettoyage des dossiers orphelins terminé.\n\n"
+                response += f"- Total des dossiers: {cleanup_result['total_folders']}\n"
+                response += f"- Total des conversations: {cleanup_result['total_chats']}\n"
+                response += f"- Dossiers orphelins nettoyés: {cleanup_result['orphaned_folders']}\n"
+                
+                if cleanup_result['cleaned_folders']:
+                    response += "\nDossiers nettoyés:\n"
+                    for folder in cleanup_result['cleaned_folders']:
+                        response += f"- {folder}\n"
+                else:
+                    response += "\nAucun dossier orphelin trouvé."
+                    
+                if __event_emitter__:
+                    __event_emitter__({"type": "content", "content": response})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            except Exception as e:
+                response = f"Erreur lors du nettoyage des dossiers orphelins: {str(e)}"
+                if __event_emitter__:
+                    __event_emitter__({"type": "content", "content": response})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+
+        # Existing commands handling
+        elif "/debug" in message or "/forcecleanup" in message:
+            try:
+                response = "Informations de débogage:\n\n"
+                response += f"- ID de conversation actuel: {self.chat_id}\n"
+                response += f"- ID de suivi interne: {self.current_chat_id}\n"
+                response += f"- Nombre de fichiers dans la liste: {len(self.file_path_list)}\n\n"
+                
+                # List folders
+                upload_folder = os.getenv("UPLOAD_FOLDER", "pptx_folder")
+                output_folder = os.getenv("OUTPUT_FOLDER", "OUTPUT")
+                
+                # Count folders
+                upload_folder_count = 0
+                if os.path.exists(upload_folder):
+                    upload_folder_count = len([d for d in os.listdir(upload_folder) if os.path.isdir(os.path.join(upload_folder, d))])
+                
+                output_folder_count = 0
+                if os.path.exists(output_folder):
+                    output_folder_count = len([d for d in os.listdir(output_folder) if os.path.isdir(os.path.join(output_folder, d))])
+                
+                response += f"- Dossiers dans {upload_folder}: {upload_folder_count}\n"
+                response += f"- Dossiers dans {output_folder}: {output_folder_count}\n\n"
+                
+                # Force run cleanup
+                response += "Exécution forcée du nettoyage...\n"
+                cleanup_result = cleanup_orphaned_folders()
+                
+                response += f"Résultat du nettoyage:\n"
+                response += f"- Total des dossiers: {cleanup_result.get('total_folders', 0)}\n"
+                response += f"- Total des conversations: {cleanup_result.get('total_chats', 0)}\n"
+                response += f"- Dossiers potentiellement orphelins: {cleanup_result.get('potential_orphaned_folders', 0)}\n"
+                response += f"- Dossiers vraiment orphelins: {cleanup_result.get('truly_orphaned_folders', 0)}\n"
+                
+                # List cleaned folders
+                cleaned_folders = cleanup_result.get('cleaned_folders', [])
+                if cleaned_folders:
+                    response += "\nDossiers nettoyés:\n"
+                    for folder in cleaned_folders:
+                        response += f"- {folder}\n"
+                else:
+                    response += "\nAucun dossier orphelin n'a été nettoyé."
+                
+                if __event_emitter__:
+                    __event_emitter__({"type": "content", "content": response})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            except Exception as e:
+                response = f"Erreur lors du débogage et du nettoyage: {str(e)}"
+                if __event_emitter__:
+                    __event_emitter__({"type": "content", "content": response})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
 
         # Ajouter la dernière réponse au contexte si elle existe
         if user_message:
@@ -435,6 +568,8 @@ class Pipeline:
             /summarize [instructions] --> Affiche les résumés existants et demande confirmation avant d'en générer un nouveau. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
             /structure --> Renvoie la structure des fichiers 
             /clear --> Retire tous les fichiers de la conversation
+            /cleanup --> Exécute manuellement le nettoyage des dossiers orphelins
+            /debug --> Affiche les informations de débogage et force l'exécution du nettoyage
             """
             self.last_response = commands
             yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"
