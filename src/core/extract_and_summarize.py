@@ -81,13 +81,14 @@ def extract_common_and_upcoming_info(project_data):
     
     return result
 
-def aggregate_and_summarize(pptx_folder):
+def aggregate_and_summarize(pptx_folder, additional_info=""):
     """
     Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
     Uses an LLM to summarize the project information and return it in the specified JSON format.
     
     Parameters:
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
+      additional_info (str, optional): Additional information or instructions for the summarization process.
     
     Returns:
       dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
@@ -202,6 +203,8 @@ def aggregate_and_summarize(pptx_folder):
     
     Voici les événements à venir:
     {events_data}
+    
+    {additional_instructions}
 
     Crée un résumé concis pour chaque projet et organise les informations selon le format JSON suivant:
     ```json
@@ -238,7 +241,8 @@ def aggregate_and_summarize(pptx_folder):
     # Prepare the inputs for the prompt
     prompt_inputs = {
         "project_data": json.dumps(processed_data["projects"], indent=2, ensure_ascii=True),
-        "events_data": processed_data["events"]
+        "events_data": processed_data["events"],
+        "additional_instructions": f"Instructions supplémentaires de l'utilisateur:\n{additional_info}" if additional_info else ""
     }
     
     # Generate the prompt
