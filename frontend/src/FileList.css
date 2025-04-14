@@ -1,0 +1,109 @@
+.files-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+  transition: background-color 0.1s;
+  font-size: 13px;
+  color: #ddd;
+}
+
+.file-item:hover {
+  background-color: rgba(128, 128, 128, 0.2);
+}
+
+.file-item.active {
+  background-color: #37373d;
+}
+
+.file-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 8px;
+}
+
+.file-icon svg {
+  color: #ddd;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex: 1;
+  text-align: left;
+}
+
+.file-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: #ddd;
+}
+
+.file-date {
+  font-size: 10px;
+  color: #888;
+}
+
+.file-actions-buttons {
+  visibility: hidden;
+  display: flex;
+}
+
+.file-item:hover .file-actions-buttons {
+  visibility: visible;
+}
+
+.action-button {
+  background: none;
+  border: none;
+  color: #ddd;
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 3px;
+  margin-left: 5px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.action-button:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.delete-button:hover {
+  background-color: rgba(255, 0, 0, 0.1);
+  color: #ff6b6b;
+}
+
+.file-actions {
+  padding: 8px;
+  border-bottom: 1px solid #3c3c3c;
+  background-color: #252526;
+}
+
+.file-actions button {
+  width: 100%;
+  margin: 0;
+  font-size: 12px;
+  padding: 4px 8px;
+  background-color: #0e639c;
+}
+
+.file-actions button:hover {
+  background-color: #1177bb;
+} 

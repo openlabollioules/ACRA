@@ -8,3 +8,4 @@ python-dotenv>=0.15.0
 requests>=2.26.0
 langchain-ollama>=0.0.1
 pydantic>=1.8.2
+python-dotenv>=0.15.0

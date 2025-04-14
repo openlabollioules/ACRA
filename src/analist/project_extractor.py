@@ -113,8 +113,8 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
             for row_idx, row in enumerate(table.rows):
                 # Skip header row if it exists (optional)
                 # You can uncomment this if your table has a header row to skip
-                # if row_idx == 0:
-                #     continue
+                if row_idx == 0:
+                    continue
                 
                 row_data = []
                 

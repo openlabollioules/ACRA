@@ -28,19 +28,38 @@ services:
       
     networks:
       - webui-net
+
   fastapi:
-      build:
-        context: .
-        dockerfile: Dockerfile.api
-      container_name: fastapi_app
-      ports:
-        - "5050:5050"
-      volumes:
-        - .:/app  
-      depends_on:
-        - pipelines
-      networks:
-        - webui-net
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: acra-api:latest
+    container_name: fastapi_app
+    ports:
+      - "5050:5050"
+    volumes:
+      - .:/app  
+    depends_on:
+      - pipelines
+    networks:
+      - webui-net
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: acra-frontend:latest
+    container_name: react_app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - fastapi
+      - openwebui
+    networks:
+      - webui-net
 
 networks:
   webui-net:

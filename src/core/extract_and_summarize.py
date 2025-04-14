@@ -7,8 +7,8 @@ from langchain_core.prompts import PromptTemplate
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from langchain_ollama import OllamaLLM
-summarize_model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
-
+summarize_model = OllamaLLM(model="deepseek-r1:32B", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
+# small_model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
 from analist import extract_projects_from_presentation
 from OLLibrary.utils.text_service import remove_tags_no_keep
 
@@ -174,7 +174,7 @@ def aggregate_and_summarize(pptx_folder):
             }
         }
     
-    # Prepare the data to send to the LLM
+    # Prepare the data to send  to the LLM
     processed_data = {
         "projects": {},
         "events": project_data.get("upcoming_events", "")
@@ -202,6 +202,8 @@ def aggregate_and_summarize(pptx_folder):
     
     Voici les événements à venir:
     {events_data}
+    
+    {additional_instructions} 
 
     Crée un résumé concis pour chaque projet et organise les informations selon le format JSON suivant:
     ```json
@@ -231,7 +233,9 @@ def aggregate_and_summarize(pptx_folder):
     3. Organiser les événements à venir par catégories pertinentes (ex: Cybersecurity, UX/UI Design, Consulting)
     4. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
     5. Assure toi que tout soit en Français.
+    6. Lorsque tu n'es pas capable de résumer une phrase laisse comme elle est.
 
+                                                          
     Les alertes ne doivent contenir que les points vraiment importants, pas besoin de tout inclure.
     """)
     
@@ -258,6 +262,9 @@ def aggregate_and_summarize(pptx_folder):
         # Clean the JSON string and parse it
         json_str = json_str.strip()
         result = json.loads(json_str)
+        
+        # ça marche pas :////
+        # result = Correction_pptx(result)
         
         # Ensure the expected structure exists
         if "activities" not in result:
@@ -307,6 +314,188 @@ def aggregate_and_summarize(pptx_folder):
         
         return result
 
+def Generate_pptx_from_text(pptx_folder, info=None):
+    """
+    Generate a JSON structure from text input that can be used by update_table_with_project_data.
+    Uses an LLM to process the text information and return it in the specified JSON format.
+    
+    Parameters:
+      pptx_folder (str): Path to the folder (used for compatibility, not used in processing).
+      info (str): Text information to process and structure into JSON format.
+    
+    Returns:
+      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
+    """
+    # If no info is provided, return empty structure
+    if not info:
+        return {
+            "activities": {},
+            "upcoming_events": {
+                "General": "Aucun événement particulier prévu."
+            }
+        }
+    
+    # Create a prompt template for the LLM
+    summarization_template = PromptTemplate.from_template("""
+    Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
+
+    Voici les données textuelles à analyser:
+    {text_data}
+
+    Ta tâche est d'extraire des informations sur les projets mentionnés, y compris:
+    1. Les noms des projets
+    2. Un résumé des informations principales pour chaque projet
+    3. Les avancements significatifs (points positifs)
+    4. Les alertes mineures (points à surveiller)
+    5. Les alertes critiques (problèmes urgents)
+    6. Les événements à venir pour chaque projet ou catégorie
+    7. Lorsque dans le summary il y a des alerts (advancements, small_alerts, critical_alerts) met entre des balises <advancements> et </advancements>, <small_alerts> et </small_alerts>, <critical_alerts> et </critical_alerts>.
+    
+    Organise les informations selon le format JSON suivant:
+    ```json
+    {{
+      "activities": {{
+        "Nom du Projet": {{
+          "summary": "Résumé concis des informations principales du projet en une ou deux phrases",
+          "alerts": {{
+            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
+            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
+            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
+          }}
+        }},
+        // Autres projets...
+      }},
+      "upcoming_events": {{
+        "Catégorie1": "Description des événements à venir pour cette catégorie",
+        "Catégorie2": "Description des événements à venir pour cette catégorie",
+        // Autres catégories...
+      }}
+    }}
+    ```
+
+    Assure-toi de:
+    1. Identifier correctement les différents projets mentionnés dans le texte
+    2. Créer un résumé concis et informatif pour chaque projet mais ne perdez pas de points importants
+    3. Catégoriser correctement les informations en advancements, small_alerts, et critical_alerts
+    4. Organiser les événements à venir par catégories pertinentes
+    5. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
+    6. Assurer que tout soit en Français
+    7. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte.
+    8. Lorsque tu catégorises les informations elle ne doivent pas être classée dans une autre catégorie par exemple une alerte mineure ne doit pas être classée dans une alerte critique et dans une alerte mineure.
+    9. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles.
+    10. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON.
+    
+    """)
+    
+    # Prepare the inputs for the prompt
+    prompt_inputs = {
+        "text_data": info
+    }
+    
+    # Generate the prompt
+    prompt = summarization_template.format(**prompt_inputs)
+    
+    # Call the LLM to generate the summary in JSON format
+    try:
+        llm_response = summarize_model.invoke(prompt)
+        # Extract the JSON part from the response
+        llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = llm_response
+        
+        # Clean the JSON string and parse it
+        json_str = json_str.strip()
+        result = json.loads(json_str)
+        
+        # Ensure the expected structure exists
+        if "activities" not in result:
+            result["activities"] = {}
+        if "upcoming_events" not in result:
+            result["upcoming_events"] = {"General": "Aucun événement particulier prévu."}
+        
+        return result
+        
+    except Exception as e:
+        print(f"Error during LLM summarization: {str(e)}")
+        # Create a basic structure as fallback
+        result = {
+            "activities": {
+                "Général": {
+                    "summary": "Information extraite du texte fourni.",
+                    "alerts": {
+                        "advancements": [],
+                        "small_alerts": [],
+                        "critical_alerts": []
+                    }
+                }
+            },
+            "upcoming_events": {
+                "General": "Aucun événement particulier prévu."
+            }
+        }
+        
+        return result
+
+def Correction_pptx(project_data):
+    """This function uses a small LLM to correct the project JSON (Merge the same projects, add missing projects, add missing events, add missing alerts)"""
+    
+    prompt = PromptTemplate.from_template("""
+    Tu es un assistant chargé de corriger un JSON de projets et d'événements.
+
+    Ton objectif est de corriger le JSON de projets et d'événements.
+
+    Voici les informations à corriger:
+    - Merge les projets identiques et sépare bien les informations de chaque branche du projet.
+    - Ajoute les projets manquants
+    - Ajoute les événements manquants
+    - Ajoute les alertes manquantes
+
+    Pour exemple de branche: 
+    Le projet Alpha est compose de deux branches:
+    - La branche Alpha 1
+    - La branche Alpha 2
+    Tu dois merge les informations de la branche Alpha 1 et Alpha 2 dans le projet Alpha.
+    Tout en séparant les informations de chaque branche.
+
+    Voici le JSON à corriger:
+    {project_data}
+
+    Voici la structure du JSON Final:
+    ```json
+    {{
+      "activities": {{
+        "Nom du Projet Global": {{
+          "summary": "Résumé concis des informations principales du projet en une ou deux phrases ajoute un \n et un - pour chaque branche du projet",
+          "alerts": {{
+            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
+            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
+            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
+          }}
+        }},
+      }},
+      "upcoming_events": {{
+        "Catégorie1": "Description des événements à venir pour cette catégorie",
+        "Catégorie2": "Description des événements à venir pour cette catégorie",
+        // Autres catégories...
+      }}
+    }}
+    ```
+    """)
+    prompt = prompt.format(project_data=project_data)
+    # llm_response = small_model.invoke(prompt)
+    llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
+    json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+    if json_match:
+        json_str = json_match.group(1)
+    else:
+        json_str = llm_response
+    
+    json_str = json_str.strip()
+    return json.loads(json_str)
+    
 if __name__ == "__main__":
     folder = "pptx_folder"  # Update with your actual folder path
     result = aggregate_and_summarize(folder)

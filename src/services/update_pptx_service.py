@@ -175,10 +175,15 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
             
             # Add information with formatted text
             tf = info_cell.text_frame
-            
+            tf.clear()  # Ensure text frame is completely cleared
+
             # Add summary text (black)
             if "summary" in project_info:
-                p = tf.add_paragraph()
+                # Use the first paragraph that already exists instead of adding a new one
+                if len(tf.paragraphs) == 0:
+                    p = tf.add_paragraph()
+                else:
+                    p = tf.paragraphs[0]
                 run = p.add_run()
                 run.text = project_info["summary"]
             
@@ -219,17 +224,34 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
         events_cell.text = ""
         
         tf = events_cell.text_frame
-        p = tf.add_paragraph()
-        run = p.add_run()
-        run.text = "Événements à venir:\n\n"
+        tf.clear()  # Ensure text frame is completely cleared
+        
+        # Use existing first paragraph if available
+        if len(tf.paragraphs) == 0:
+            p = tf.add_paragraph()
+        else:
+            p = tf.paragraphs[0]
         
         # Add each event category 
+        first_event = True
         for category, event_text in project_data["upcoming_events"].items():
-            p = tf.add_paragraph()
-            run = p.add_run()
+            if first_event:
+                # Use the first paragraph for the first event
+                run = p.add_run()
+                first_event = False
+            else:
+                p = tf.add_paragraph()
+                run = p.add_run()
             run.text = f"{category}: {event_text}"
             p.level = 1  # Add a bit of indentation
-    
+
+    # Set the font size to 8 for all runs in the table
+    for row in table.rows:
+        for cell in row.cells:
+            if cell.text_frame:
+                for paragraph in cell.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.size = Pt(8)
     # Save the presentation
     prs.save(output_path)
     print(f"Updated table with project data and saved to {output_path}")

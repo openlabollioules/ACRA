@@ -1,34 +1,20 @@
-# Use Python 3.9 slim image
-FROM python:3.9-slim
+FROM node:16-alpine
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Copy package.json and package-lock.json
+COPY frontend/package*.json ./
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
+# Install dependencies
+RUN npm install
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy the public directory
+COPY frontend/public ./public
 
-# Copy the rest of the application
-COPY . .
+# Copy the source files
+COPY frontend/src ./src
 
-# Create necessary directories
-RUN mkdir -p /app/uploads /app/pptx_folder /app/conversations
+EXPOSE 3000
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV UPLOAD_FOLDER=/app/pptx_folder
-ENV OUTPUT_FOLDER=/app/OUTPUT
-ENV TEMPLATE_FILE=/app/templates/CRA_TEMPLATE_IA.pptx
-
-# Expose port
-EXPOSE 5050
-
-# Run the application
-CMD ["python", "src/api/api.py"] 
+CMD ["npm", "start"]

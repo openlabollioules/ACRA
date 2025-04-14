@@ -4,17 +4,34 @@ import uvicorn
 from pptx import presentation
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Query
 from fastapi.responses import FileResponse  
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
 from services import update_table_cell, update_table_multiple_cells, update_table_with_project_data
-from core import aggregate_and_summarize
+from core import aggregate_and_summarize, Generate_pptx_from_text
+from OLLibrary.utils.log_service import setup_logging, get_logger
+from dotenv import load_dotenv
+
+# Set up logging
+setup_logging(app_name="ACRA_API")
+logger = get_logger(__name__)
 
 # starting Fast API 
 app = FastAPI() 
 load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
+logger.info(f"API starting with UPLOAD_FOLDER={UPLOAD_FOLDER}, OUTPUT_FOLDER={OUTPUT_FOLDER}")
+
+# Configuration CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permet toutes les origines en développement
+    allow_credentials=True,
+    allow_methods=["*"],  # Permet toutes les méthodes
+    allow_headers=["*"],  # Permet tous les headers
+)
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
 @app.get("/acra/{folder_name}")
@@ -71,7 +88,10 @@ async def summarize_ppt(folder_name: str):
 
         # Return the download URL
         filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"http://localhost:5050/download/{filename}"}
+        load_dotenv()
+        download_url = f"http://localhost:5050/download/{OUTPUT_FOLDER}/{folder_name}/{filename}"
+        logger.info(f"Summary generated successfully: {download_url}")
+        return {"download_url": download_url}
     
     except Exception as e:
         # Log the exception for debugging
@@ -146,8 +166,8 @@ async def get_slide_structure_wcolor(filename: str):
 
 # Testing the function with : 
 #  curl -OJ http://localhost:5050/download/TEST_FILE.pptx
-@app.get("/download/{filename}")
-async def download_file(filename: str):
+@app.get("/download/{base_folder}/{folder_name}/{filename}")
+async def download_file(base_folder: str, folder_name: str, filename: str):
     """
     Download a file from the server.
     This endpoint allows clients to download a file from the server by specifying the filename in the URL path.
@@ -158,7 +178,7 @@ async def download_file(filename: str):
     Raises:
         HTTPException: If the file does not exist, a 404 status code is returned with a detail message "File Not found.".
     """
-    file_path = os.path.join(OUTPUT_FOLDER, filename)
+    file_path = os.path.join(base_folder, folder_name, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File Not found.")
     
@@ -197,8 +217,92 @@ async def delete_all_pptx_files(foldername:str):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression de {file}: {str(e)}")
 
-    return {"message": f"{len(files)} fichiers supprimés avec succès."}
+    return {"message": f"{deleted_count} fichiers supprimés avec succès du dossier {pptx_folder_path}."}
 
+@app.delete("/delete_output_files/{foldername}")
+async def delete_output_files(foldername:str):
+    """
+    Supprime tous les fichiers du dossier OUTPUT/foldername.
+
+    Args:
+        foldername (str): Le nom du dossier dans OUTPUT à vider.
+
+    Returns:
+        dict: Un message confirmant la suppression des fichiers.
+    
+    Raises:
+        HTTPException: Si le dossier n'existe pas.
+    """
+    output_folder_path = os.path.join(OUTPUT_FOLDER, foldername)
+    
+    if not os.path.exists(output_folder_path):
+        return {"message": f"Le dossier {output_folder_path} n'existe pas."}
+
+    # Liste des fichiers dans le dossier OUTPUT
+    files = [f for f in os.listdir(output_folder_path) if os.path.isfile(os.path.join(output_folder_path, f))]
+    
+    if not files:
+        return {"message": "Aucun fichier à supprimer dans le dossier OUTPUT."}
+
+    # Suppression des fichiers un par un
+    deleted_count = 0
+    for file in files:
+        file_path = os.path.join(output_folder_path, file)
+        try:
+            os.remove(file_path)
+            deleted_count += 1
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression de {file}: {str(e)}")
+
+    return {"message": f"{deleted_count} fichiers supprimés avec succès du dossier OUTPUT/{foldername}."}
+@app.post("/generate_text_report/{foldername}")
+async def generate_text_report(foldername: str, text_data: dict):
+    """Takes the ACRA Info and generates a PPTX from text files, following the template"""
+    try:
+        # Extract text info from request body
+        info = text_data.get("info", "")
+        
+        # Determine the target folder
+        target_folder = UPLOAD_FOLDER
+        if foldername:
+            target_folder = os.path.join(UPLOAD_FOLDER, foldername)
+        
+        # Ensure the upload directory exists
+        os.makedirs(target_folder, exist_ok=True)
+        
+        # Generate the summary using our updated function with the text information
+        project_data = Generate_pptx_from_text(target_folder, info)
+        
+        # Check if we have any data to show
+        if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
+            raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite du texte fourni.")
+        
+        # Set the output filename
+        output_filename = f"{OUTPUT_FOLDER}/updated_presentation_from_text.pptx"
+        if foldername:
+            output_filename = f"{OUTPUT_FOLDER}/{foldername}_text_summary.pptx"
+        
+        # Update the template with the project data using the new format
+        generated_pptx = update_table_with_project_data(
+            pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
+            slide_index=0,  # first slide
+            table_shape_index=0,  # index of the table
+            project_data=project_data,
+            output_path=output_filename
+        )
+
+        # Return the download URL
+        filename = os.path.basename(generated_pptx)
+        # TODO: add a way to download a file from the UPLOAD_FOLDER
+        # copy the file to the upload folder
+        shutil.copy(output_filename, os.path.join(target_folder, os.path.basename(output_filename)))
+
+        return {"download_url": f"http://localhost:5050/download/pptx_folder/{foldername}/{filename}"}
+    
+    except Exception as e:
+        # Log the exception for debugging
+        print(f"Error in generate_text_report: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
 
 def run():
     uvicorn.run(app, host="0.0.0.0", port=5050)
