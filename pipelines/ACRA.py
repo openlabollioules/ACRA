@@ -120,7 +120,7 @@ class Pipeline:
         Sinon, traite la structure et la stocke en cache.
 
         Args:
-            data (dict): Dictionnaire contenant les projets et métadonnées.
+            data (dict): Dictionnaire contenant les projets et métadonnées conforme au nouveau format.
 
         Returns:
             str: Une chaîne de texte structurée listant les informations de tous les projets.
@@ -146,62 +146,52 @@ class Pipeline:
         upcoming_events = structure_to_process.get("upcoming_events", {})
             
         # Fonction récursive pour afficher les projets à tous les niveaux de hiérarchie
-        def format_project_level(projects, level=0):
+        def format_project_hierarchy(project_name, content, level=0):
             output = ""
-            indent = ""
-            for project_name, content in projects.items():
-                # Déterminer si c'est un niveau terminal (avec des données) ou un container
-                is_terminal = "information" in content
-                
-                # Appliquer le style approprié selon le niveau de hiérarchie
-                if level == 0:
-                    # Premier niveau - projet principal
-                    output += f"🔶 **{project_name}**\n"
-                elif level == 1:
-                    # Deuxième niveau - sous-projet
-                    indent = "  "
-                    output += f"{indent}- 📌 **{project_name}**\n"
-                else:
-                    # Niveaux plus profonds
-                    indent = "    "
-                    output += f"{indent}- 📎 *{project_name}*\n"
-                
-                if is_terminal:
-                    # C'est un niveau terminal avec des données
-                    
-                    # Ajouter les informations
-                    if content.get("information"):
-                        info_lines = content['information'].split('\n')
-                        for line in info_lines:
-                            if line.strip():
-                                output += f"{indent} - {line}\n"
-                        output += "\n"
-                    
-                    # Ajouter les alertes critiques
-                    if content.get("critical") and content["critical"]:
-                        output += f"{indent} - 🔴 **Alertes Critiques:**\n"
-                        for alert in content["critical"]:
-                            output += f"{indent} - {alert}\n"
-                        output += "\n"
-                    
-                    # Ajouter les alertes à surveiller
-                    if content.get("small") and content["small"]:
-                        output += f"{indent} - 🟡 **Alertes à surveiller:**\n"
-                        for alert in content["small"]:
-                            output += f"{indent} - {alert}\n"
-                        output += "\n"
-                    
-                    # Ajouter les avancements
-                    if content.get("advancements") and content["advancements"]:
-                        output += f"{indent} - 🟢 **Avancements:**\n"
-                        for advancement in content["advancements"]:
-                            output += f"{indent} - {advancement}\n"
-                        output += "\n"
-                else:
-                    # C'est un niveau intermédiaire (container), traiter récursivement
-                    output += format_project_level(content, level + 1)
-            output += "\n"
-                    
+            indent = "  " * level
+            
+            # Format le nom du projet selon son niveau
+            if level == 0:
+                output += f"{indent}🔶 **{project_name}**\n"
+            elif level == 1:
+                output += f"{indent}📌 **{project_name}**\n"
+            else:
+                output += f"{indent}📎 *{project_name}*\n"
+            
+            # Ajouter les informations si elles existent
+            if "information" in content and content["information"]:
+                info_lines = content["information"].split('\n')
+                for line in info_lines:
+                    if line.strip():
+                        output += f"{indent}- {line}\n"
+                output += "\n"
+            
+            # Ajouter les alertes critiques
+            if "critical" in content and content["critical"]:
+                output += f"{indent}- 🔴 **Alertes Critiques:**\n"
+                for alert in content["critical"]:
+                    output += f"{indent}  - {alert}\n"
+                output += "\n"
+            
+            # Ajouter les alertes à surveiller
+            if "small" in content and content["small"]:
+                output += f"{indent}- 🟡 **Alertes à surveiller:**\n"
+                for alert in content["small"]:
+                    output += f"{indent}  - {alert}\n"
+                output += "\n"
+            
+            # Ajouter les avancements
+            if "advancements" in content and content["advancements"]:
+                output += f"{indent}- 🟢 **Avancements:**\n"
+                for advancement in content["advancements"]:
+                    output += f"{indent}  - {advancement}\n"
+                output += "\n"
+            
+            # Traiter les sous-projets ou sous-sous-projets de façon récursive
+            for key, value in content.items():
+                if isinstance(value, dict) and key not in ["information", "critical", "small", "advancements"]:
+                    output += format_project_hierarchy(key, value, level + 1)
+            
             return output
 
         # Créer le résultat final
@@ -210,8 +200,9 @@ class Pipeline:
         # Afficher le nombre de présentations analysées
         result += f"📊 **Synthèse globale de {processed_files} fichier(s) analysé(s)**\n\n"
         
-        # Formater récursivement tous les niveaux de projets
-        result += format_project_level(projects)
+        # Formater chaque projet principal
+        for project_name, project_content in projects.items():
+            result += format_project_hierarchy(project_name, project_content)
         
         # Ajouter la section des événements à venir par service
         if upcoming_events:
@@ -471,3 +462,6 @@ class Pipeline:
         self.last_response = cumulative_content
 
 pipeline = Pipeline()
+
+if __name__ == "__main__":
+    summarize_ppt("1040706a-776f-4233-b823-b49658dc42dd")

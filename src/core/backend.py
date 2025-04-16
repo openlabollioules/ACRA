@@ -31,19 +31,40 @@ def summarize_ppt(folder_name : str):
         # Ensure the upload directory exists
         os.makedirs(target_folder, exist_ok=True)
         
+        print(f"Starting summarization for folder: {target_folder}")
+        
+        # List files in folder for diagnostics
+        files_in_folder = os.listdir(target_folder)
+        pptx_files = [f for f in files_in_folder if f.lower().endswith(".pptx")]
+        print(f"Found {len(pptx_files)} PPTX files in folder: {pptx_files}")
+        
+        if not pptx_files:
+            raise Exception(f"Aucun fichier PowerPoint (.pptx) trouvé dans le dossier {folder_name}.")
+        
         # Récupérer les données des projets à partir de get_slide_structure
         structure_result = aggregate_and_summarize(folder_name)
         project_data = structure_result.get("projects", {})
         upcoming_events = structure_result.get("upcoming_events", {})
+        errors = structure_result.get("metadata", {}).get("errors", [])
+        
+        # Print diagnostic information
+        print(f"Project data contains {len(project_data)} top-level projects")
+        print(f"Upcoming events contains data for {len(upcoming_events)} services")
         
         # Check if we have any data to show
         if not project_data or len(project_data) == 0:
-            raise Exception("Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier.")
+            error_message = "Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier."
+            if errors:
+                error_message += f" Erreurs rencontrées: {'; '.join(errors)}"
+            print(f"ERROR: {error_message}")
+            raise Exception(error_message)
         
         # Set the output filename
         output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
         if folder_name:
             output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
+        
+        print(f"Creating summary PowerPoint at: {output_filename}")
         
         # Update the template with the project data using the new format
         summarized_file_path = update_table_with_project_data(
@@ -57,7 +78,9 @@ def summarize_ppt(folder_name : str):
 
         # Return the download URL
         filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"http://localhost:5050/download/{filename}", "filename": filename}
+        download_url = f"http://localhost:5050/download/{filename}"
+        print(f"Summary created successfully. Download URL: {download_url}")
+        return {"download_url": download_url, "filename": filename}
 
 def get_slide_structure(foldername : str):
     folder_path = os.path.join(UPLOAD_FOLDER, foldername)

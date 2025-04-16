@@ -99,24 +99,35 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
     Returns a list of rows with text and formatting information.
     """
     results = []
+    table_count = 0
     
-    for shape in slide.shapes:
+    for shape_idx, shape in enumerate(slide.shapes):
+        print(f"Shape {shape_idx}: Type {type(shape).__name__}")
+        
+        if hasattr(shape, 'has_table'):
+            print(f"Shape {shape_idx} has_table attribute: {shape.has_table}")
+        
         if shape.has_table:
+            table_count += 1
             table = shape.table
+            print(f"Processing table {table_count} with {len(table.rows)} rows and {len(table.columns)} columns")
             
             # Verify that we have the expected table structure - at least 3 columns
             if len(table.columns) < 3:
-                print(f"Warning: Table does not have 3 columns (found {len(table.columns)}). Skipping.")
+                print(f"WARNING: Table does not have 3 columns (found {len(table.columns)}). Skipping.")
                 continue
             
             # Process each row in the table
+            row_processed = 0
             for row_idx, row in enumerate(table.rows):
                 # Skip header row if it exists (optional)
                 # You can uncomment this if your table has a header row to skip
                 if row_idx == 0:
+                    print(f"Skipping header row (row 0)")
                     continue
                 
                 row_data = []
+                has_content = False
                 
                 # We only care about the 3 columns we expect - but avoid slicing
                 for col_idx, cell in enumerate(row.cells):
@@ -124,8 +135,11 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                     if col_idx >= 3:
                         break
                         
+                    cell_text = cell.text.strip() if hasattr(cell, 'text') else ""
+                    print(f"Row {row_idx}, Column {col_idx}: Text length {len(cell_text)}")
+                    
                     # Vérifier si la cellule a du contenu
-                    if cell.text_frame:
+                    if hasattr(cell, 'text_frame'):
                         cell_data = {
                             "text": "",
                             "paragraphs": [],
@@ -133,18 +147,22 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                         }
                         
                         # Traiter chaque paragraphe dans la cellule
-                        for paragraph in cell.text_frame.paragraphs:
+                        for para_idx, paragraph in enumerate(cell.text_frame.paragraphs):
+                            para_text = paragraph.text.strip()
+                            print(f"  Paragraph {para_idx}: Text length {len(para_text)}")
+                            
                             para_data = {
                                 "text": "",
                                 "runs": []
                             }
                             
                             # Traiter chaque run dans le paragraphe
-                            for run in paragraph.runs:
+                            for run_idx, run in enumerate(paragraph.runs):
                                 run_text = run.text
                                 if run_text.strip():  # ignorer les runs vides
                                     color = get_rgb_color(run)
                                     color_type = identify_color_type(color)
+                                    print(f"    Run {run_idx}: Text '{run_text[:20]}...' Color type: {color_type}")
                                     
                                     para_data["text"] += run_text
                                     para_data["runs"].append({
@@ -152,6 +170,7 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                                         "color": color,
                                         "color_type": color_type
                                     })
+                                    has_content = True
                             
                             # Ajouter le paragraphe seulement s'il contient du texte
                             if para_data["text"].strip():
@@ -160,6 +179,8 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                             
                         cell_data["text"] = cell_data["text"].strip()
                         row_data.append(cell_data)
+                        if cell_data["text"]:
+                            has_content = True
                     else:
                         # Ajouter une cellule vide avec l'index de colonne approprié
                         row_data.append({"text": "", "paragraphs": [], "column_index": col_idx})
@@ -167,7 +188,14 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                 # Ajouter cette ligne aux résultats seulement si elle contient au moins des données dans la colonne 0 ou 1
                 if any(cell.get("text", "").strip() for cell in row_data if cell.get("column_index") in [0, 1]):
                     results.append(row_data)
+                    row_processed += 1
+                    print(f"Row {row_idx} added to results")
+                else:
+                    print(f"Row {row_idx} skipped (no content in columns 0 or 1)")
+            
+            print(f"Processed {row_processed} rows from table {table_count}")
     
+    print(f"Total tables found: {table_count}, Total rows extracted: {len(results)}")
     return results
 
 def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict[str, Dict]:
@@ -329,20 +357,64 @@ def extract_projects_from_presentation(file_path: str) -> Dict[str, Dict]:
     Focuses on the first slide with a title and a 3-column table.
     """
     try:
+        print(f"Attempting to process PowerPoint file: {file_path}")
         prs = Presentation(file_path)
+        print(f"Successfully loaded presentation with {len(prs.slides)} slides")
         
         # Process only the first slide as specified
         if len(prs.slides) > 0:
             slide = prs.slides[0]
             title = extract_title_from_slide(slide)
+            print(f"Extracted title: {title}")
+            
+            # Check if there are any tables in the slide
+            has_tables = any(shape.has_table for shape in slide.shapes)
+            print(f"Slide has tables: {has_tables}")
+            
+            # Count shapes in the slide
+            shape_count = len(slide.shapes)
+            print(f"Slide has {shape_count} shapes")
+            
             table_data = extract_table_data_from_slide(slide)
+            print(f"Extracted table data with {len(table_data)} rows")
+            
+            if not table_data:
+                print("WARNING: No table data was extracted from the slide")
+                # Return empty structure rather than failing
+                return {
+                    "projects": {},
+                    "metadata": {
+                        "title": title,
+                        "collected_upcoming_events": [],
+                        "error": "No table data extracted from slide"
+                    }
+                }
+            
             projects = extract_projects_from_table_data(table_data, title)
+            print(f"Extracted projects: {len(projects.get('projects', {}))} top-level projects")
             return projects
         else:
-            return {}
+            print("WARNING: Presentation has no slides")
+            return {
+                "projects": {},
+                "metadata": {
+                    "title": "No slides",
+                    "collected_upcoming_events": [],
+                    "error": "Presentation has no slides"
+                }
+            }
     except Exception as e:
-        print(f"Error processing presentation: {e}")
-        return {}
+        error_message = f"Error processing presentation: {e}"
+        print(error_message)
+        # Return empty structure with error info instead of empty dict
+        return {
+            "projects": {},
+            "metadata": {
+                "title": "Error",
+                "collected_upcoming_events": [],
+                "error": error_message
+            }
+        }
 
 def format_projects_as_json(projects: Dict[str, Dict], output_file: Optional[str] = None) -> str:
     """
