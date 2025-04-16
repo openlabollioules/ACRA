@@ -99,24 +99,35 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
     Returns a list of rows with text and formatting information.
     """
     results = []
+    table_count = 0
     
-    for shape in slide.shapes:
+    for shape_idx, shape in enumerate(slide.shapes):
+        print(f"Shape {shape_idx}: Type {type(shape).__name__}")
+        
+        if hasattr(shape, 'has_table'):
+            print(f"Shape {shape_idx} has_table attribute: {shape.has_table}")
+        
         if shape.has_table:
+            table_count += 1
             table = shape.table
+            print(f"Processing table {table_count} with {len(table.rows)} rows and {len(table.columns)} columns")
             
             # Verify that we have the expected table structure - at least 3 columns
             if len(table.columns) < 3:
-                print(f"Warning: Table does not have 3 columns (found {len(table.columns)}). Skipping.")
+                print(f"WARNING: Table does not have 3 columns (found {len(table.columns)}). Skipping.")
                 continue
             
             # Process each row in the table
+            row_processed = 0
             for row_idx, row in enumerate(table.rows):
                 # Skip header row if it exists (optional)
                 # You can uncomment this if your table has a header row to skip
-                # if row_idx == 0:
-                #     continue
+                if row_idx == 0:
+                    print(f"Skipping header row (row 0)")
+                    continue
                 
                 row_data = []
+                has_content = False
                 
                 # We only care about the 3 columns we expect - but avoid slicing
                 for col_idx, cell in enumerate(row.cells):
@@ -124,45 +135,67 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                     if col_idx >= 3:
                         break
                         
-                    if cell.text_frame:
+                    cell_text = cell.text.strip() if hasattr(cell, 'text') else ""
+                    print(f"Row {row_idx}, Column {col_idx}: Text length {len(cell_text)}")
+                    
+                    # Vérifier si la cellule a du contenu
+                    if hasattr(cell, 'text_frame'):
                         cell_data = {
                             "text": "",
                             "paragraphs": [],
                             "column_index": col_idx  # Track which column this is
                         }
                         
-                        # Process each paragraph in the cell
-                        for paragraph in cell.text_frame.paragraphs:
+                        # Traiter chaque paragraphe dans la cellule
+                        for para_idx, paragraph in enumerate(cell.text_frame.paragraphs):
+                            para_text = paragraph.text.strip()
+                            print(f"  Paragraph {para_idx}: Text length {len(para_text)}")
+                            
                             para_data = {
                                 "text": "",
                                 "runs": []
                             }
                             
-                            # Process each run in the paragraph
-                            for run in paragraph.runs:
+                            # Traiter chaque run dans le paragraphe
+                            for run_idx, run in enumerate(paragraph.runs):
                                 run_text = run.text
-                                color = get_rgb_color(run)
-                                color_type = identify_color_type(color)
-                                
-                                para_data["text"] += run_text
-                                para_data["runs"].append({
-                                    "text": run_text,
-                                    "color": color,
-                                    "color_type": color_type
-                                })
+                                if run_text.strip():  # ignorer les runs vides
+                                    color = get_rgb_color(run)
+                                    color_type = identify_color_type(color)
+                                    print(f"    Run {run_idx}: Text '{run_text[:20]}...' Color type: {color_type}")
+                                    
+                                    para_data["text"] += run_text
+                                    para_data["runs"].append({
+                                        "text": run_text,
+                                        "color": color,
+                                        "color_type": color_type
+                                    })
+                                    has_content = True
                             
-                            cell_data["text"] += para_data["text"] + "\n"
-                            cell_data["paragraphs"].append(para_data)
+                            # Ajouter le paragraphe seulement s'il contient du texte
+                            if para_data["text"].strip():
+                                cell_data["text"] += para_data["text"] + "\n"
+                                cell_data["paragraphs"].append(para_data)
                             
                         cell_data["text"] = cell_data["text"].strip()
                         row_data.append(cell_data)
+                        if cell_data["text"]:
+                            has_content = True
                     else:
+                        # Ajouter une cellule vide avec l'index de colonne approprié
                         row_data.append({"text": "", "paragraphs": [], "column_index": col_idx})
                 
-                # Only add rows that have some content
-                if any(cell.get("text", "").strip() for cell in row_data):
+                # Ajouter cette ligne aux résultats seulement si elle contient au moins des données dans la colonne 0 ou 1
+                if any(cell.get("text", "").strip() for cell in row_data if cell.get("column_index") in [0, 1]):
                     results.append(row_data)
+                    row_processed += 1
+                    print(f"Row {row_idx} added to results")
+                else:
+                    print(f"Row {row_idx} skipped (no content in columns 0 or 1)")
+            
+            print(f"Processed {row_processed} rows from table {table_count}")
     
+    print(f"Total tables found: {table_count}, Total rows extracted: {len(results)}")
     return results
 
 def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict[str, Dict]:
@@ -173,14 +206,23 @@ def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict
     2. Project information with colored text for alerts (column_index=1)
     3. Upcoming events (column_index=2)
     Returns a dictionary with project names as keys and their information as values.
+    
+    Automatically detects project hierarchies based on name patterns:
+    - Simple naming: "Project Subproject" -> {Project: {Subproject: {...}}}
+    - Parenthesis naming: "Project (Subproject)" -> {Project: {Subproject: {...}}}
+    - Multi-level naming: "Main Sub (Detail)" -> {Main: {Sub: {Detail: {...}}}}
+    
+    Note: upcoming_events from column 2 are collected separately and not stored at the project level.
+    They will be used to populate the upcoming_events by service at a higher level.
     """
+    # Initialize with a multi-level structure for projects hierarchy
     projects = {}
-    upcoming_events = []
+    collected_upcoming_events = []
     
-    # Initialize the title as the main key - use "activities" as the standard key
-    projects["activities"] = {}
+    # Store raw project data first to analyze hierarchy later
+    raw_projects = {}
     
-    # Process each row in the table data
+    # Process each row in the table data to collect raw project data
     for row in table_data:
         # Get cells by column index
         project_name_cell = next((cell for cell in row if cell.get("column_index") == 0), {})
@@ -188,52 +230,126 @@ def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict
         events_cell = next((cell for cell in row if cell.get("column_index") == 2), {})
         
         # Extract project name from column 0
-        project_name = project_name_cell.get("text", "").strip()
-        if project_name:
-            # Initialize project data if this is a new project
-            if project_name not in projects["activities"]:
-                projects["activities"][project_name] = {
-                    "information": "",
-                    "alerts": {
-                        "advancements": [],
-                        "small_alerts": [],
-                        "critical_alerts": []
-                    }
-                }
+        full_project_name = project_name_cell.get("text", "").strip()
+        if not full_project_name:
+            continue
             
-            # Process project information from column 1
-            for paragraph in project_info_cell.get("paragraphs", []):
-                projects["activities"][project_name]["information"] += paragraph.get("text", "") + "\n"
-                
-                # Process runs to extract colored alerts
-                for run in paragraph.get("runs", []):
-                    if run["color_type"] == "advancement":
-                        projects["activities"][project_name]["alerts"]["advancements"].append(run["text"])
-                    elif run["color_type"] == "small_alert":
-                        projects["activities"][project_name]["alerts"]["small_alerts"].append(run["text"])
-                    elif run["color_type"] == "critical_alert":
-                        projects["activities"][project_name]["alerts"]["critical_alerts"].append(run["text"])
-            
-            # Clean up information text
-            projects["activities"][project_name]["information"] = projects["activities"][project_name]["information"].strip()
+        # Clean and normalize the project name for comparison
+        normalized_name = full_project_name.lower().strip()
         
-        # Process the upcoming events from column 2 (collect from all rows with data)
-        if events_cell.get("text", "").strip() and not events_cell.get("text") in upcoming_events:
-            for paragraph in events_cell.get("paragraphs", []):
-                paragraph_text = paragraph.get("text", "").strip()
-                if paragraph_text and paragraph_text not in upcoming_events:
-                    upcoming_events.append(paragraph_text)
+        # Store raw data with the original name
+        raw_projects[full_project_name] = {
+            "normalized_name": normalized_name,
+            "information": "",
+            "critical": [],
+            "small": [],
+            "advancements": []
+            # Note: upcoming_events n'est plus stocké au niveau du projet
+        }
+        
+        # Process project information from column 1
+        for paragraph in project_info_cell.get("paragraphs", []):
+            raw_projects[full_project_name]["information"] += paragraph.get("text", "") + "\n"
+            
+            # Process runs to extract colored alerts
+            for run in paragraph.get("runs", []):
+                if run["color_type"] == "advancement":
+                    raw_projects[full_project_name]["advancements"].append(run["text"])
+                elif run["color_type"] == "small_alert":
+                    raw_projects[full_project_name]["small"].append(run["text"])
+                elif run["color_type"] == "critical_alert":
+                    raw_projects[full_project_name]["critical"].append(run["text"])
+        
+        # Clean up information text
+        raw_projects[full_project_name]["information"] = raw_projects[full_project_name]["information"].strip()
+        
+        # Process upcoming events from column 2 - collect them pour les remonter au niveau supérieur
+        events_text = events_cell.get("text", "").strip()
+        if events_text and events_text not in collected_upcoming_events:
+            collected_upcoming_events.append(events_text)
     
-    # Add upcoming events to the projects dictionary
-    if upcoming_events:
-        projects["upcoming_events"] = "\n".join(upcoming_events).strip()
+    # Function to extract hierarchy from project name
+    def extract_hierarchy(name):
+        # Try to match patterns like "Main Sub (Detail)" or "Main Sub Detail"
+        
+        # First check for parenthesis format: "Project (Subproject)"
+        parenthesis_match = re.search(r'(.*?)\s*\((.*?)\)', name)
+        if parenthesis_match:
+            main_part = parenthesis_match.group(1).strip()
+            sub_part = parenthesis_match.group(2).strip()
+            
+            # Check if main_part itself contains spaces indicating further hierarchy
+            main_parts = main_part.split(' ')
+            if len(main_parts) > 1:
+                # Take first word as top-level project
+                top_level = main_parts[0].strip()
+                # Rest as mid-level
+                mid_level = ' '.join(main_parts[1:]).strip()
+                return [top_level, mid_level, sub_part]
+            else:
+                return [main_part, sub_part]
+        
+        # No parenthesis, check for space-separated parts
+        parts = name.split(' ')
+        if len(parts) >= 2:
+            # First word as main project, rest as subproject
+            return [parts[0], ' '.join(parts[1:])]
+        
+        # No clear hierarchy, treat as single project
+        return [name]
     
-    # Store the title as metadata
-    projects["metadata"] = {
-        "title": title
+    # Build the project hierarchy
+    for original_name, data in raw_projects.items():
+        # Extract hierarchy levels from the project name
+        hierarchy = extract_hierarchy(original_name)
+        
+        # Convert hierarchy to lowercase for case-insensitive matching
+        hierarchy_lower = [level.lower() for level in hierarchy]
+        
+        # Build nested structure
+        current_level = projects
+        for i, level in enumerate(hierarchy):
+            level_lower = hierarchy_lower[i]
+            
+            # Find existing key with case-insensitive match
+            existing_key = None
+            for key in current_level.keys():
+                if key.lower() == level_lower:
+                    existing_key = key
+                    break
+            
+            # Use the original case from the first occurrence we saw
+            actual_key = existing_key if existing_key else level
+            
+            if i == len(hierarchy) - 1:  # Last level - add the data
+                if actual_key not in current_level:
+                    current_level[actual_key] = data.copy()
+                    # Remove the normalized_name from the final data
+                    del current_level[actual_key]["normalized_name"]
+                else:
+                    # Merge with existing data
+                    current_level[actual_key]["information"] += "\n" + data["information"] if current_level[actual_key]["information"] else data["information"]
+                    current_level[actual_key]["critical"].extend(data["critical"])
+                    current_level[actual_key]["small"].extend(data["small"])
+                    current_level[actual_key]["advancements"].extend(data["advancements"])
+            else:
+                # Create intermediate level if it doesn't exist
+                if actual_key not in current_level:
+                    current_level[actual_key] = {}
+                
+                # Move to next level
+                current_level = current_level[actual_key]
+    
+    # Add metadata for reference
+    metadata = {
+        "title": title,
+        "collected_upcoming_events": collected_upcoming_events  # Stocker les événements collectés dans les métadonnées
     }
     
-    return projects
+    return {
+        "projects": projects,
+        "metadata": metadata
+    }
 
 def extract_projects_from_presentation(file_path: str) -> Dict[str, Dict]:
     """
@@ -241,20 +357,64 @@ def extract_projects_from_presentation(file_path: str) -> Dict[str, Dict]:
     Focuses on the first slide with a title and a 3-column table.
     """
     try:
+        print(f"Attempting to process PowerPoint file: {file_path}")
         prs = Presentation(file_path)
+        print(f"Successfully loaded presentation with {len(prs.slides)} slides")
         
         # Process only the first slide as specified
         if len(prs.slides) > 0:
             slide = prs.slides[0]
             title = extract_title_from_slide(slide)
+            print(f"Extracted title: {title}")
+            
+            # Check if there are any tables in the slide
+            has_tables = any(shape.has_table for shape in slide.shapes)
+            print(f"Slide has tables: {has_tables}")
+            
+            # Count shapes in the slide
+            shape_count = len(slide.shapes)
+            print(f"Slide has {shape_count} shapes")
+            
             table_data = extract_table_data_from_slide(slide)
+            print(f"Extracted table data with {len(table_data)} rows")
+            
+            if not table_data:
+                print("WARNING: No table data was extracted from the slide")
+                # Return empty structure rather than failing
+                return {
+                    "projects": {},
+                    "metadata": {
+                        "title": title,
+                        "collected_upcoming_events": [],
+                        "error": "No table data extracted from slide"
+                    }
+                }
+            
             projects = extract_projects_from_table_data(table_data, title)
+            print(f"Extracted projects: {len(projects.get('projects', {}))} top-level projects")
             return projects
         else:
-            return {}
+            print("WARNING: Presentation has no slides")
+            return {
+                "projects": {},
+                "metadata": {
+                    "title": "No slides",
+                    "collected_upcoming_events": [],
+                    "error": "Presentation has no slides"
+                }
+            }
     except Exception as e:
-        print(f"Error processing presentation: {e}")
-        return {}
+        error_message = f"Error processing presentation: {e}"
+        print(error_message)
+        # Return empty structure with error info instead of empty dict
+        return {
+            "projects": {},
+            "metadata": {
+                "title": "Error",
+                "collected_upcoming_events": [],
+                "error": error_message
+            }
+        }
 
 def format_projects_as_json(projects: Dict[str, Dict], output_file: Optional[str] = None) -> str:
     """

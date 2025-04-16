@@ -3,8 +3,14 @@ import re
 import json
 from pptx import Presentation
 from langchain_core.prompts import PromptTemplate
+from copy import deepcopy
+from dotenv import load_dotenv
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Load environment variables
+load_dotenv()
+UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 
 from langchain_ollama import OllamaLLM
 summarize_model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
@@ -90,159 +96,326 @@ def aggregate_and_summarize(pptx_folder):
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
     
     Returns:
-      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
+      dict: A nested dictionary with project/subproject structure containing information and alerts
     """
-    project_data = {}
+    # New project structure
+    aggregated_data = {}
     file_count = 0
+    processed_files = []
+    extraction_errors = []
+    
+    # Determine the full path to the folder
+    full_path = pptx_folder
+    if not os.path.isabs(pptx_folder):
+        full_path = os.path.join(UPLOAD_FOLDER, pptx_folder)
+    
+    print(f"Processing folder: {full_path}")
     
     # Check if the folder exists
-    if not os.path.exists(pptx_folder):
-        print(f"Warning: Folder {pptx_folder} does not exist.")
+    if not os.path.exists(full_path):
+        error_msg = f"Warning: Folder {full_path} does not exist."
+        print(error_msg)
+        extraction_errors.append(error_msg)
         return {
-            "activities": {},
-            "upcoming_events": {
-                "General": "Aucun événement particulier prévu."
-            }
+            "projects": {},
+            "upcoming_events": {},
+            "metadata": {
+                "processed_files": 0,
+                "folder": os.path.basename(pptx_folder),
+                "errors": extraction_errors
+            },
+            "source_files": []
+        }
+    
+    # List all files in the folder to diagnose issues
+    all_files = os.listdir(full_path)
+    print(f"Files in folder: {all_files}")
+    pptx_files = [f for f in all_files if f.lower().endswith(".pptx")]
+    print(f"PPTX files found: {pptx_files}")
+    
+    if not pptx_files:
+        error_msg = f"No PowerPoint files found in folder {full_path}"
+        print(error_msg)
+        extraction_errors.append(error_msg)
+        return {
+            "projects": {},
+            "upcoming_events": {},
+            "metadata": {
+                "processed_files": 0,
+                "folder": os.path.basename(pptx_folder),
+                "errors": extraction_errors
+            },
+            "source_files": []
         }
     
     # Get all PPTX files in the folder
-    for filename in os.listdir(pptx_folder):
-        if filename.lower().endswith(".pptx"):
-            file_path = os.path.join(pptx_folder, filename)
-            # Extract project data from the presentation
-            try:
-                file_project_data = extract_projects_from_presentation(file_path)
-                file_count += 1
-                
-                # Process activities from file_project_data
-                if "activities" in file_project_data:
-                    for project_name, project_info in file_project_data["activities"].items():
-                        # If the project already exists, merge the information
-                        if project_name in project_data:
-                            # Merge information
-                            if "information" in project_info and project_info["information"]:
-                                if "information" not in project_data[project_name]:
-                                    project_data[project_name]["information"] = project_info["information"]
-                                else:
-                                    project_data[project_name]["information"] += "\n" + project_info["information"]
+    for filename in pptx_files:
+        file_path = os.path.join(full_path, filename)
+        print(f"Processing file: {file_path}")
+        
+        # Extract project data from the presentation
+        try:
+            file_project_data = extract_projects_from_presentation(file_path)
+            file_count += 1
+            
+            # Add processed file info
+            service_name = os.path.basename(file_path).split('_')[-1].replace('.pptx', '')
+            processed_file_info = {
+                "filename": filename,
+                "service_name": service_name,
+                "processed": True
+            }
+            
+            # Check if any projects were extracted
+            if "projects" in file_project_data and file_project_data["projects"]:
+                print(f"Successfully extracted projects from {filename}")
+                project_count = len(file_project_data["projects"])
+                processed_file_info["project_count"] = project_count
+            else:
+                # Check for error message in metadata
+                if "metadata" in file_project_data and "error" in file_project_data["metadata"]:
+                    error = file_project_data["metadata"]["error"]
+                    print(f"Error in file {filename}: {error}")
+                    extraction_errors.append(f"File {filename}: {error}")
+                    processed_file_info["error"] = error
+                else:
+                    warning = f"No projects extracted from {filename}"
+                    print(warning)
+                    extraction_errors.append(warning)
+                    processed_file_info["warning"] = warning
+            
+            processed_files.append(processed_file_info)
+            
+            # Process projects data from file_project_data
+            if "projects" in file_project_data:
+                for main_project, main_project_content in file_project_data["projects"].items():
+                    # Ensure the main project exists in aggregated data
+                    if main_project not in aggregated_data:
+                        aggregated_data[main_project] = {}
+                    
+                    # Check if main_project_content is a terminal node or contains subprojects
+                    is_terminal = "information" in main_project_content
+                    
+                    if is_terminal:
+                        # This is a terminal node, merge the data directly
+                        if "information" in aggregated_data[main_project]:
+                            # Merge with existing data
+                            aggregated_data[main_project]["information"] += "\n" + main_project_content["information"] if aggregated_data[main_project]["information"] else main_project_content["information"]
                             
-                            # Merge alerts
-                            if "alerts" in project_info:
-                                if "alerts" not in project_data[project_name]:
-                                    project_data[project_name]["alerts"] = {
-                                        "advancements": [],
-                                        "small_alerts": [],
-                                        "critical_alerts": []
-                                    }
-                                
-                                # Merge advancements
-                                if "advancements" in project_info["alerts"]:
-                                    project_data[project_name]["alerts"]["advancements"].extend(
-                                        project_info["alerts"]["advancements"]
-                                    )
-                                
-                                # Merge small alerts
-                                if "small_alerts" in project_info["alerts"]:
-                                    project_data[project_name]["alerts"]["small_alerts"].extend(
-                                        project_info["alerts"]["small_alerts"]
-                                    )
-                                
-                                # Merge critical alerts
-                                if "critical_alerts" in project_info["alerts"]:
-                                    project_data[project_name]["alerts"]["critical_alerts"].extend(
-                                        project_info["alerts"]["critical_alerts"]
+                            # Merge alerts and advancements
+                            for alert_type in ["critical", "small", "advancements"]:
+                                if alert_type in main_project_content:
+                                    if alert_type not in aggregated_data[main_project]:
+                                        aggregated_data[main_project][alert_type] = []
+                                    aggregated_data[main_project][alert_type].extend(
+                                        item for item in main_project_content[alert_type] 
+                                        if item not in aggregated_data[main_project][alert_type]
                                     )
                         else:
-                            # Add new project
-                            project_data[project_name] = project_info
-                
-                # Add upcoming_events if available
-                if "upcoming_events" in file_project_data:
-                    if "upcoming_events" not in project_data:
-                        project_data["upcoming_events"] = file_project_data["upcoming_events"]
+                            # Copy the data for a new terminal node
+                            aggregated_data[main_project] = {
+                                "information": main_project_content.get("information", ""),
+                                "critical": main_project_content.get("critical", []),
+                                "small": main_project_content.get("small", []),
+                                "advancements": main_project_content.get("advancements", [])
+                            }
                     else:
-                        project_data["upcoming_events"] += "\n" + file_project_data["upcoming_events"]
-            except Exception as e:
-                print(f"Error processing file {filename}: {str(e)}")
+                        # This contains subprojects
+                        for subproject_name, subproject_content in main_project_content.items():
+                            # Skip metadata fields that might be in the dictionary
+                            if subproject_name in ["information", "critical", "small", "advancements"]:
+                                # Handle top-level project information if it exists alongside subprojects
+                                if subproject_name == "information" and subproject_content:
+                                    if "information" not in aggregated_data[main_project]:
+                                        aggregated_data[main_project]["information"] = subproject_content
+                                    else:
+                                        aggregated_data[main_project]["information"] += "\n" + subproject_content
+                                elif subproject_name in ["critical", "small", "advancements"] and subproject_content:
+                                    if subproject_name not in aggregated_data[main_project]:
+                                        aggregated_data[main_project][subproject_name] = []
+                                    aggregated_data[main_project][subproject_name].extend(
+                                        item for item in subproject_content 
+                                        if item not in aggregated_data[main_project][subproject_name]
+                                    )
+                                continue
+                            
+                            # Process the subproject
+                            if subproject_name not in aggregated_data[main_project]:
+                                aggregated_data[main_project][subproject_name] = {}
+                            
+                            # Check if subproject_content is a terminal node or further nested
+                            sub_is_terminal = "information" in subproject_content
+                            
+                            if sub_is_terminal:
+                                # This is a terminal subproject
+                                if "information" in aggregated_data[main_project][subproject_name]:
+                                    # Merge with existing data
+                                    aggregated_data[main_project][subproject_name]["information"] += "\n" + subproject_content["information"] if aggregated_data[main_project][subproject_name]["information"] else subproject_content["information"]
+                                    
+                                    # Merge alerts and advancements
+                                    for alert_type in ["critical", "small", "advancements"]:
+                                        if alert_type in subproject_content:
+                                            if alert_type not in aggregated_data[main_project][subproject_name]:
+                                                aggregated_data[main_project][subproject_name][alert_type] = []
+                                            aggregated_data[main_project][subproject_name][alert_type].extend(
+                                                item for item in subproject_content[alert_type] 
+                                                if item not in aggregated_data[main_project][subproject_name][alert_type]
+                                            )
+                                else:
+                                    # Copy the data for a new terminal subproject
+                                    aggregated_data[main_project][subproject_name] = {
+                                        "information": subproject_content.get("information", ""),
+                                        "critical": subproject_content.get("critical", []),
+                                        "small": subproject_content.get("small", []),
+                                        "advancements": subproject_content.get("advancements", [])
+                                    }
+                            else:
+                                # This contains sub-subprojects
+                                for subsubproject_name, subsubproject_content in subproject_content.items():
+                                    # Skip metadata fields
+                                    if subsubproject_name in ["information", "critical", "small", "advancements"]:
+                                        # Handle subproject information if it exists alongside sub-subprojects
+                                        if subsubproject_name == "information" and subsubproject_content:
+                                            if "information" not in aggregated_data[main_project][subproject_name]:
+                                                aggregated_data[main_project][subproject_name]["information"] = subsubproject_content
+                                            else:
+                                                aggregated_data[main_project][subproject_name]["information"] += "\n" + subsubproject_content
+                                        elif subsubproject_name in ["critical", "small", "advancements"] and subsubproject_content:
+                                            if subsubproject_name not in aggregated_data[main_project][subproject_name]:
+                                                aggregated_data[main_project][subproject_name][subsubproject_name] = []
+                                            aggregated_data[main_project][subproject_name][subsubproject_name].extend(
+                                                item for item in subsubproject_content 
+                                                if item not in aggregated_data[main_project][subproject_name][subsubproject_name]
+                                            )
+                                        continue
+                                    
+                                    # Process the sub-subproject (assuming it's always a terminal node)
+                                    if subsubproject_name not in aggregated_data[main_project][subproject_name]:
+                                        aggregated_data[main_project][subproject_name][subsubproject_name] = {
+                                            "information": subsubproject_content.get("information", ""),
+                                            "critical": subsubproject_content.get("critical", []),
+                                            "small": subsubproject_content.get("small", []),
+                                            "advancements": subsubproject_content.get("advancements", [])
+                                        }
+                                    else:
+                                        # Merge with existing data
+                                        if "information" in subsubproject_content:
+                                            if "information" in aggregated_data[main_project][subproject_name][subsubproject_name]:
+                                                aggregated_data[main_project][subproject_name][subsubproject_name]["information"] += "\n" + subsubproject_content["information"]
+                                            else:
+                                                aggregated_data[main_project][subproject_name][subsubproject_name]["information"] = subsubproject_content["information"]
+                                        
+                                        # Merge alerts and advancements
+                                        for alert_type in ["critical", "small", "advancements"]:
+                                            if alert_type in subsubproject_content:
+                                                if alert_type not in aggregated_data[main_project][subproject_name][subsubproject_name]:
+                                                    aggregated_data[main_project][subproject_name][subsubproject_name][alert_type] = []
+                                                aggregated_data[main_project][subproject_name][subsubproject_name][alert_type].extend(
+                                                    item for item in subsubproject_content[alert_type] 
+                                                    if item not in aggregated_data[main_project][subproject_name][subsubproject_name][alert_type]
+                                                )
+            
+            # Handle upcoming events from metadata
+            if "metadata" in file_project_data and "collected_upcoming_events" in file_project_data["metadata"]:
+                # Need to know the service name to categorize events
+                service_name = os.path.basename(file_path).split('_')[-1].replace('.pptx', '')
+                events = file_project_data["metadata"]["collected_upcoming_events"]
+                
+                if events:
+                    processed_file_info["events_count"] = len(events)
+                    
+                    if "upcoming_events" not in aggregated_data:
+                        aggregated_data["upcoming_events"] = {}
+                    
+                    if service_name not in aggregated_data["upcoming_events"]:
+                        aggregated_data["upcoming_events"][service_name] = []
+                    
+                    for event in events:
+                        if event not in aggregated_data["upcoming_events"][service_name]:
+                            aggregated_data["upcoming_events"][service_name].append(event)
+                else:
+                    processed_file_info["events_count"] = 0
+        except Exception as e:
+            error_message = f"Error processing file {filename}: {str(e)}"
+            print(error_message)
+            extraction_errors.append(error_message)
+            processed_files.append({
+                "filename": filename, 
+                "processed": False,
+                "error": str(e)
+            })
     
-    # If no files were processed, return empty data structure
+    # If no projects were extracted but files were processed, that's a problem
+    if file_count > 0 and not aggregated_data:
+        print(f"WARNING: {file_count} files were processed but no project data was extracted")
+        extraction_errors.append(f"{file_count} files were processed but no project data was extracted")
+    
+    # If no files were processed, return empty data structure with error info
     if file_count == 0:
+        error_msg = "No files were successfully processed"
+        print(error_msg)
+        extraction_errors.append(error_msg)
         return {
-            "activities": {},
-            "upcoming_events": {
-                "General": "Aucun événement particulier prévu."
-            }
+            "projects": {},
+            "upcoming_events": {},
+            "metadata": {
+                "processed_files": 0,
+                "folder": os.path.basename(pptx_folder),
+                "errors": extraction_errors
+            },
+            "source_files": processed_files
         }
     
-    # Prepare the data to send to the LLM
-    processed_data = {
-        "projects": {},
-        "events": project_data.get("upcoming_events", "")
+    # Prepare the data structure for return
+    result = {
+        "projects": aggregated_data.get("projects", aggregated_data),
+        "upcoming_events": aggregated_data.get("upcoming_events", {}),
+        "metadata": {
+            "processed_files": file_count,
+            "folder": os.path.basename(pptx_folder),
+            "errors": extraction_errors if extraction_errors else []
+        },
+        "source_files": processed_files
     }
     
-    # Extract essential information from each project
-    for project_name, project_info in project_data.items():
-        # Skip the "upcoming_events" key as it's not a project
-        if project_name == "upcoming_events":
-            continue
-        
-        processed_data["projects"][project_name] = {
-            "information": project_info.get("information", "").strip(),
-            "advancements": project_info.get("alerts", {}).get("advancements", []),
-            "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
-            "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
-        }
+    # Remove upcoming_events from projects if it was accidentally included there
+    if "upcoming_events" in result["projects"]:
+        del result["projects"]["upcoming_events"]
+    
+    # Log the size and structure of the result
+    print(f"Final result structure: {len(result['projects'])} projects, {len(result['upcoming_events'])} services with events")
+    if not result["projects"]:
+        print("WARNING: No projects were extracted from any files")
+    
+    # Prepare the data to send to the LLM for summarization if needed
+    prompt_inputs = {
+        "project_data": json.dumps(result, indent=2, ensure_ascii=False)
+    }
     
     # Create a prompt template for the LLM
     summarization_template = PromptTemplate.from_template("""
-    Tu es un assistant chargé de résumer des informations de projets et de les formater dans un JSON spécifique.
+    Tu es un assistant chargé de résumer des informations de projets et de les formater.
 
     Voici les données des projets:
     {project_data}
     
-    Voici les événements à venir:
-    {events_data}
-
-    Crée un résumé concis pour chaque projet et organise les informations selon le format JSON suivant:
-    ```json
-    {{
-      "activities": {{
-        "Nom du Projet": {{
-          "summary": "Résumé concis des informations principales du projet en une ou deux phrases",
-          "alerts": {{
-            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
-            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
-            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
-          }}
-        }},
-        // Autres projets...
-      }},
-      "upcoming_events": {{
-        "Catégorie1": "Description des événements à venir pour cette catégorie",
-        "Catégorie2": "Description des événements à venir pour cette catégorie",
-        // Autres catégories...
-      }}
-    }}
-    ```
-
-    Assure-toi de:
-    1. Créer un résumé synthétique et informatif pour chaque projet
-    2. Conserver les informations essentielles des alertes (advancements, small_alerts, critical_alerts)
-    3. Organiser les événements à venir par catégories pertinentes (ex: Cybersecurity, UX/UI Design, Consulting)
-    4. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
-    5. Assure toi que tout soit en Français.
-
-    Les alertes ne doivent contenir que les points vraiment importants, pas besoin de tout inclure.
-    """)
+    Analyse ces données et identifie les points clés pour chaque projet et sous-projet.
+    Pour chaque entrée, tu peux conserver la structure mais synthétise les informations
+    pour qu'elles soient plus concises tout en préservant les détails importants.
     
-    # Prepare the inputs for the prompt
-    prompt_inputs = {
-        "project_data": json.dumps(processed_data["projects"], indent=2, ensure_ascii=True),
-        "events_data": processed_data["events"]
-    }
+    Les alertes critiques, alertes mineures et avancements doivent être conservés tels quels,
+    mais tu peux éliminer les redondances éventuelles.
+    
+    Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
+    """)
     
     # Generate the prompt
     prompt = summarization_template.format(**prompt_inputs)
+    
+    # Only try to use LLM if we have actual project data
+    if not result["projects"]:
+        print("Skipping LLM summarization because no project data was extracted")
+        return result
     
     # Call the LLM to generate the summary in JSON format
     try:
@@ -257,54 +430,13 @@ def aggregate_and_summarize(pptx_folder):
         
         # Clean the JSON string and parse it
         json_str = json_str.strip()
-        result = json.loads(json_str)
+        summarized_result = json.loads(json_str)
         
-        # Ensure the expected structure exists
-        if "activities" not in result:
-            result["activities"] = {}
-        if "upcoming_events" not in result:
-            result["upcoming_events"] = {"General": "Aucun événement particulier prévu."}
-        
-        return result
+        return summarized_result
         
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
-        # Create a basic structure with the raw data as fallback
-        result = {
-            "activities": {},
-            "upcoming_events": {}
-        }
-        
-        # Process upcoming events
-        upcoming_texts = project_data.get("upcoming_events", "")
-        if upcoming_texts:
-            # Try to identify categories in the text
-            categories = re.findall(r"([A-Za-z0-9/]+):\s*([^:]+?)(?=\n[A-Za-z0-9/]+:|$)", upcoming_texts, re.DOTALL)
-            
-            if categories:
-                for category, text in categories:
-                    result["upcoming_events"][category.strip()] = text.strip()
-            else:
-                result["upcoming_events"]["General"] = upcoming_texts.strip()
-        else:
-            result["upcoming_events"]["General"] = "Aucun événement particulier prévu."
-        
-        # Process projects without LLM summarization
-        for project_name, project_info in project_data.items():
-            if project_name == "upcoming_events":
-                continue
-                
-            summary = project_info.get("information", "").strip()
-            
-            result["activities"][project_name] = {
-                "summary": summary if summary else "Aucune information disponible.",
-                "alerts": {
-                    "advancements": project_info.get("alerts", {}).get("advancements", []),
-                    "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
-                    "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
-                }
-            }
-        
+        # If summarization fails, return the raw aggregated data
         return result
 
 if __name__ == "__main__":

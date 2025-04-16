@@ -5,11 +5,13 @@ import shutil
 import requests
 from typing import List, Union, Generator, Iterator, Dict, Any
 from langchain_ollama import  OllamaLLM
+from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
+from core import summarize_ppt, get_slide_structure, delete_all_pptx_files
 
 from OLLibrary.utils.text_service import remove_tags_keep
 
-
+load_dotenv()
 
 class Pipeline:
 
@@ -17,12 +19,16 @@ class Pipeline:
 
         self.last_response = None
 
+        self.use_api = False
+
         # self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
-        self.streaming_model = OllamaLLM(model="deepseek-r1:14b", base_url="http://host.docker.internal:11434", num_ctx=64000, stream=True)
+        self.streaming_model = OllamaLLM(model="deepseek-r1:14b", base_url="http://host.docker.internal:11434", num_ctx=131000, stream=True)
 
         self.api_url = "http://host.docker.internal:5050"
 
         self.openwebui_api = "http://host.docker.internal:3030"
+
+        self.small_model = OllamaLLM(model="qwen2.5:3b", base_url="http://host.docker.internal:11434", num_ctx=131000)
 
         self.file_path_list = []
 
@@ -31,6 +37,9 @@ class Pipeline:
 
         self.system_prompt = ""
         self.message_id = 0
+        
+        # Variable pour stocker la structure traitée
+        self.cached_structure = None
 
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""
@@ -38,6 +47,7 @@ class Pipeline:
         self.system_prompt = ""
         self.file_path_list = []
         self.message_id = 0
+        self.cached_structure = None
 
     def fetch(self, endpoint):
             """Effectue une requête GET synchrone"""
@@ -51,158 +61,197 @@ class Pipeline:
         response = requests.post(url, data=data, files=files)
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
-    def summarize_folder(self, folder_name=None):
+    def summarize_folder(self, foldername=None):
         """
         Envoie une demande pour résumer tous les fichiers PowerPoint dans un dossier.
         
         Args:
-            folder_name (str, optional): Le nom du dossier à résumer. Si None, utilise le chat_id.
+            foldername (str, optional): Le nom du dossier à résumer. Si None, utilise le chat_id.
         
         Returns:
             dict: Les résultats de l'opération de résumé.
         """
-        if folder_name is None:
-            folder_name = self.chat_id
-            
-        return self.fetch(f"acra/{folder_name}")
+        if foldername is None:
+            foldername = self.chat_id
+        
+        if self.use_api:
+            return self.fetch(f"acra/{foldername}")
+        return summarize_ppt(foldername)
 
-    def analyze_slide_structure(self, folder_name=None):
+    def extract_service_name(self, filename):
+        """
+        Extrait le nom du service à partir du nom du fichier PowerPoint en utilisant le modèle small_model.
+        
+        Args:
+            filename (str): Le nom du fichier PowerPoint
+            
+        Returns:
+            str: Le nom du service extrait
+        """
+        prompt = f"Tu es un assistant spécialisé dans le traitement automatique des noms de fichiers. On te donne un nom de fichier de présentation (PowerPoint) contenant un identifiant unique suivi du titre du document. Ton objectif est d'extraire uniquement le titre du document dans un format propre et lisible pour un humain. Le titre est toujours situé après le dernier underscore (`_`) ou après une chaîne d'identifiants. Supprime l'extension `.pptx` ou toute autre extension. Remplace les underscores (`_`) ou tirets (`-`) par des espaces, et capitalise correctement chaque mot. Exemple : **Nom de fichier :** `dc56be63-37a6-4ed6-9223-50f545028ab4_CRA_SERVICE_UX.pptx`   **Titre extrait :** `Service UX` Donne uniquement le titre extrait (pas d'explication), en une seule ligne. voici le nom du fichier : {filename}"
+        
+        service_name = self.small_model.invoke(prompt)
+        # Nettoyer la réponse (enlever les espaces, retours à la ligne, etc.)
+        return service_name.strip()
+
+    def analyze_slide_structure(self, foldername=None):
         """
         Analyse la structure des diapositives dans un dossier.
         
         Args:
-            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
+            foldername (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
         
         Returns:
             dict: Les résultats de l'analyse.
         """
-        if folder_name is None:
-            folder_name = self.chat_id
-            
-        return self.fetch(f"get_slide_structure/{folder_name}")
+        if foldername is None:
+            foldername = self.chat_id
+        
+        if self.use_api:
+            return self.fetch(f"get_slide_structure/{foldername}")
+        return get_slide_structure(foldername)
     
-    def format_all_slide_data(self, presentations: dict) -> str:
+    def format_all_slide_data(self, data: dict) -> str:
         """
-        Formate les données de plusieurs présentations PPTX en une seule chaîne de texte structurée.
+        Formate les données de plusieurs présentations PPTX en une seule chaîne de texte structurée,
+        regroupant tous les projets sans séparation par fichier et avec les événements à venir par service.
+        
+        Si une structure traitée existe déjà en cache et que data n'est pas None, utilise la structure en cache.
+        Sinon, traite la structure et la stocke en cache.
 
         Args:
-            presentations (dict): Dictionnaire contenant plusieurs fichiers et leurs données.
+            data (dict): Dictionnaire contenant les projets et métadonnées conforme au nouveau format.
 
         Returns:
-            str: Une chaîne de texte structurée listant les informations de chaque fichier PPTX.
+            str: Une chaîne de texte structurée listant les informations de tous les projets.
         """
-        result = ""
-
-        if not presentations.get("presentations"):
+        # Si data est None ou vide, renvoyer un message d'erreur
+        if not data:
             return "Aucun fichier PPTX fourni."
-
-        for presentation in presentations["presentations"]:
-            filename = presentation.get("filename", "Unknown File")
-            total_slides = presentation.get("slide data", {}).get("total_slides", 0)
-
-            result += f"\n📂 **Présentation : {filename}**\n"
-            result += f"📊 **Nombre total de diapositives : {total_slides+1}**\n\n"
-
-            temp_alerts_critical = []
-            temp_alerts_warning = []
-            temp_alerts_advancements = []
-            temp_global_content = []
-            content = presentation.get("project_data", {})
-            activites = content.get('activities', {})
-            evenements = content.get('upcoming_events', [])
-
-            for item in activites:
-                # Format global content with project name as a heading
-                temp_global_content.append(f"**{item}**:\n{activites.get(item).get('information')}")
-                
-                if activites.get(item).get("alerts"):
-                    alerts = activites.get(item).get("alerts")
-                    
-                    # Format critical alerts
-                    if alerts.get("critical_alerts"):
-                        temp_alerts_critical.append(f"**{item}**:")
-                        for alert in alerts.get("critical_alerts", []):
-                            temp_alerts_critical.append(f"- {alert}")
-                    
-                    # Format small alerts
-                    if alerts.get("small_alerts"):
-                        temp_alerts_warning.append(f"**{item}**:")
-                        for alert in alerts.get("small_alerts", []):
-                            temp_alerts_warning.append(f"- {alert}")
-                    
-                    # Format advancements
-                    if alerts.get("advancements"):
-                        temp_alerts_advancements.append(f"**{item}**:")
-                        for advancement in alerts.get("advancements", []):
-                            temp_alerts_advancements.append(f"- {advancement}")
-
-            # Format global information section
-            result += "**Informations globales:**\n"
-            for info in temp_global_content:
-                result += f"{info}\n\n"
             
-            # Format alerts sections with better styling
-            if temp_alerts_critical:
-                result += "🔴 **Alertes Critiques:**\n"
-                result += "\n".join(temp_alerts_critical) + "\n\n"
-            else:
-                result += "🔴 **Alertes Critiques:** Aucune alerte critique à signaler.\n\n"
-                
-            if temp_alerts_warning:
-                result += "🟡 **Alertes à surveiller:**\n"
-                result += "\n".join(temp_alerts_warning) + "\n\n"
-            else:
-                result += "🟡 **Alertes à surveiller:** Aucune alerte mineure à signaler.\n\n"
-                
-            if temp_alerts_advancements:
-                result += "🟢 **Avancements:**\n"
-                result += "\n".join(temp_alerts_advancements) + "\n\n"
-            else:
-                result += "🟢 **Avancements:** Aucun avancement significatif à signaler.\n\n"
-
-            # Format upcoming events section
-            result += "**Evénements des semaines à venir:**\n"
-            if evenements:
-                result += f"{evenements}\n\n"
-            else:
-                result += "Aucun événement particulier prévu pour les semaines à venir.\n\n"
+        # Si data est fourni, mettre à jour le cache
+        self.cached_structure = data
+        
+        # Utiliser la structure en cache si elle existe
+        structure_to_process = self.cached_structure
+        
+        # Vérifier si nous avons des projets
+        projects = structure_to_process.get("projects", {})
+        if not projects:
+            return "Aucun projet trouvé dans les fichiers analysés."
             
-            result += "-" * 50 + "\n"  # Séparateur entre fichiers
+        # Récupérer les métadonnées et événements à venir
+        metadata = structure_to_process.get("metadata", {})
+        processed_files = metadata.get("processed_files", 0)
+        upcoming_events = structure_to_process.get("upcoming_events", {})
+            
+        # Fonction récursive pour afficher les projets à tous les niveaux de hiérarchie
+        def format_project_hierarchy(project_name, content, level=0):
+            output = ""
+            indent = "  " * level
+            
+            # Format le nom du projet selon son niveau
+            if level == 0:
+                output += f"{indent}🔶 **{project_name}**\n"
+            elif level == 1:
+                output += f"{indent}📌 **{project_name}**\n"
+            else:
+                output += f"{indent}📎 *{project_name}*\n"
+            
+            # Ajouter les informations si elles existent
+            if "information" in content and content["information"]:
+                info_lines = content["information"].split('\n')
+                for line in info_lines:
+                    if line.strip():
+                        output += f"{indent}- {line}\n"
+                output += "\n"
+            
+            # Ajouter les alertes critiques
+            if "critical" in content and content["critical"]:
+                output += f"{indent}- 🔴 **Alertes Critiques:**\n"
+                for alert in content["critical"]:
+                    output += f"{indent}  - {alert}\n"
+                output += "\n"
+            
+            # Ajouter les alertes à surveiller
+            if "small" in content and content["small"]:
+                output += f"{indent}- 🟡 **Alertes à surveiller:**\n"
+                for alert in content["small"]:
+                    output += f"{indent}  - {alert}\n"
+                output += "\n"
+            
+            # Ajouter les avancements
+            if "advancements" in content and content["advancements"]:
+                output += f"{indent}- 🟢 **Avancements:**\n"
+                for advancement in content["advancements"]:
+                    output += f"{indent}  - {advancement}\n"
+                output += "\n"
+            
+            # Traiter les sous-projets ou sous-sous-projets de façon récursive
+            for key, value in content.items():
+                if isinstance(value, dict) and key not in ["information", "critical", "small", "advancements"]:
+                    output += format_project_hierarchy(key, value, level + 1)
+            
+            return output
+
+        # Créer le résultat final
+        result = ""
+        
+        # Afficher le nombre de présentations analysées
+        result += f"📊 **Synthèse globale de {processed_files} fichier(s) analysé(s)**\n\n"
+        
+        # Formater chaque projet principal
+        for project_name, project_content in projects.items():
+            result += format_project_hierarchy(project_name, project_content)
+        
+        # Ajouter la section des événements à venir par service
+        if upcoming_events:
+            result += "\n\n📅 **Événements à venir par service:**\n\n"
+            for service, events in upcoming_events.items():
+                if events:
+                    result += f"- **{service}:**\n"
+                    for event in events:
+                        result += f"  - {event}\n"
+                    result += "\n"
+        else:
+            result += "\n\n📅 **Événements à venir:** Aucun événement particulier prévu.\n"
 
         return result.strip()
 
 
-    def delete_all_files(self, folder=None):
+    def delete_all_files(self, foldername=None):
         """
         Supprime tous les fichiers dans un dossier.
         
         Args:
-            folder (str, optional): Le nom du dossier à vider. Si None, utilise le chat_id.
+            foldername (str, optional): Le nom du dossier à vider. Si None, utilise le chat_id.
         
         Returns:
             dict: Les résultats de l'opération de suppression.
         """
-        if folder is None:
-            folder = self.chat_id
-            
-        url = f"{self.api_url}/delete_all_pptx_files/{folder}"
-        response = requests.delete(url) 
-        return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
+        if foldername is None:
+            foldername = self.chat_id
+
+        if self.use_api:
+            url = f"{self.api_url}/delete_all_pptx_files/{foldername}"
+            response = requests.delete(url) 
+            return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
+        return delete_all_pptx_files(foldername)
     
-    def get_files_in_folder(self, folder_name=None):
+    def get_files_in_folder(self, foldername=None):
         """
         Récupère la liste des fichiers dans un dossier.
         
         Args:
-            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
+            foldername (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
         
         Returns:
             list: Liste des noms de fichiers PPTX dans le dossier.
         """
-        if folder_name is None:
-            folder_name = self.chat_id
+        if foldername is None:
+            foldername = self.chat_id
             
-        folder_path = os.path.join("./pptx_folder", folder_name)
+        folder_path = os.path.join("./pptx_folder", foldername)
         if not os.path.exists(folder_path):
             return []
             
@@ -217,13 +266,18 @@ class Pipeline:
             if not self.current_chat_id:
                 self.current_chat_id = self.chat_id
 
-        # Create folder with conversation ID
+        # Create foldername with conversation ID
         conversation_folder = os.path.join("./pptx_folder", self.chat_id)
         os.makedirs(conversation_folder, exist_ok=True)
+        print(f"Created folder at : {os.path.join('./pptx_folder', self.chat_id)}")
 
         # Extract files from body['metadata']['files']
         files = body.get("metadata", {}).get("files", [])
         if files:
+            # Réinitialiser la structure en cache car de nouveaux fichiers ont été ajoutés
+            self.cached_structure = None
+            
+            # Traiter les fichiers
             for file_entry in files:
                 file_data = file_entry.get("file", {})
                 filename = file_data.get("filename", "N/A")
@@ -232,17 +286,27 @@ class Pipeline:
                 filecomplete_name = file_id + "_" + filename
 
                 source_path = os.path.join("./uploads", filecomplete_name)
-                # Update destination to use conversation folder
+                # Update destination to use conversation foldername
                 destination_path = os.path.join(conversation_folder, filecomplete_name)
                 
                 self.file_path_list.append(destination_path)
                 shutil.copy(source_path, destination_path)
-            response = self.analyze_slide_structure()
+                
+                # Extraire et afficher le nom du service pour information
+                service_name = self.extract_service_name(filename)
+                print(f"Fichier {filename} extrait comme service: {service_name}")
+                
+            # Analyser la structure
+            response = self.analyze_slide_structure(self.chat_id)
             if "error" in response:
                 response = f"Erreur lors de l'analyse de la structure: {response['error']}"
             else:
+                # Formater la réponse
                 response = self.format_all_slide_data(response)
-            self.system_prompt = "# Voici les informations des fichiers PPTX toutes les informations sont importantes pour la compréhension du message de l'utilisateur et les données sont triée : \n\n" +  response + "# voici le message de l'utilisateur : " 
+                # Stocker la structure en cache
+                self.cached_structure = response
+                
+            self.system_prompt = "# Voici les informations des fichiers PPTX toutes les informations sont importantes pour la compréhension du message de l'utilisateur et les données sont triées : \n\n" +  response + "# voici le message de l'utilisateur : " 
         
         return body
 
@@ -268,16 +332,6 @@ class Pipeline:
         - /structure: Analyse la structure des diapositives
         - /clear: Supprime tous les fichiers de la conversation
         """
-        # # Vérifier si c'est une nouvelle conversation en examinant les métadonnées du corps
-        # new_chat_id = body.get("metadata", {}).get("chat_id", "default")
-        # if self.current_chat_id and new_chat_id != self.current_chat_id:
-        #     print(f"New conversation detected in pipe: {new_chat_id} (was: {self.current_chat_id})")
-        #     self.reset_conversation_state()
-        #     self.current_chat_id = new_chat_id
-        #     self.chat_id = new_chat_id
-        # else:
-        #     self.current_chat_id = new_chat_id
-        #     self.chat_id = new_chat_id
         message = user_message.lower()  # Convertir en minuscules pour simplifier la correspondance
         __event_emitter__ = body.get("__event_emitter__")
 
@@ -296,18 +350,35 @@ class Pipeline:
             return
         
         elif "/structure" in message:
-            response = self.analyze_slide_structure()
-            if "error" in response:
-                response = f"Erreur lors de l'analyse de la structure: {response['error']}"
+            if self.cached_structure is None:
+                # Récupérer la structure des diapositives
+                response = self.analyze_slide_structure(self.chat_id)
+                
+                if "error" in response:
+                    response_text = f"Erreur lors de l'analyse de la structure: {response['error']}"
+                    if __event_emitter__:
+                        __event_emitter__({"type": "content", "content": response_text})
+                    yield f"data: {json.dumps({'choices': [{'message': {'content': response_text}}]})}\n\n"
+                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                    self.last_response = response_text
+                    return
+                
+                # Formater les données de la structure
+                formatted_response = self.format_all_slide_data(response)
+                self.cached_structure = formatted_response
+                if __event_emitter__:
+                    __event_emitter__({"type": "content", "content": formatted_response})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': formatted_response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = formatted_response
+                return
             else:
-                response = self.format_all_slide_data(response)
-            if __event_emitter__:
-                __event_emitter__({"type": "content", "content": response})
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
-            return
-        
+                if __event_emitter__:
+                    __event_emitter__({"type": "content", "content": self.cached_structure})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': self.cached_structure}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = self.cached_structure
+                return
         elif "/clear" in message:
             response = self.delete_all_files()
             if "error" in response:
@@ -315,6 +386,7 @@ class Pipeline:
             else:
                 response = response.get('message', "Les fichiers ont été supprimés avec succès.")
                 self.file_path_list = []  # Réinitialiser la liste des fichiers
+                self.cached_structure = None  # Réinitialiser la structure en cache
             if __event_emitter__:
                 __event_emitter__({"type": "content", "content": response})
             yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
@@ -390,3 +462,6 @@ class Pipeline:
         self.last_response = cumulative_content
 
 pipeline = Pipeline()
+
+if __name__ == "__main__":
+    summarize_ppt("1040706a-776f-4233-b823-b49658dc42dd")

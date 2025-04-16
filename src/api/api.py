@@ -2,33 +2,28 @@ import os,sys
 import shutil
 import uvicorn
 from pptx import presentation
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse  
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from analist import analyze_presentation , analyze_presentation_with_colors, extract_projects_from_presentation
-from services import update_table_cell, update_table_multiple_cells, update_table_with_project_data
-from core import aggregate_and_summarize
+from core import summarize_ppt, get_slide_structure, get_slide_structure_wcolor, delete_all_pptx_files
 
 # starting Fast API 
 app = FastAPI() 
 load_dotenv()
-UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER")
-OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER")
+UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
 @app.get("/acra/{folder_name}")
-async def summarize_ppt(folder_name: str):
+async def summarize(folder_name: str):
     """
     Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
-    The PowerPoint will be structured with 3 columns:
-      - Column 1: Project names (each project in a separate row)
-      - Column 2: Project information with colored text:
-          * Black: Common information
-          * Green: Advancements
-          * Orange: Small alerts
-          * Red: Critical alerts
-      - Column 3: Upcoming events (all in one row)
+    The PowerPoint will be structured with a hierarchical format:
+      - Main projects as headers
+      - Subprojects under each main project
+      - Information, alerts for each subproject
+      - Events listed by service at the bottom
 
     Args:
         folder_name (str): The name of the folder containing PowerPoint files to analyze.
@@ -40,90 +35,39 @@ async def summarize_ppt(folder_name: str):
         HTTPException: If there's an error processing the PowerPoint files.
     """
     try:
-        # Determine the target folder
-        target_folder = UPLOAD_FOLDER
-        if folder_name:
-            target_folder = os.path.join(UPLOAD_FOLDER, folder_name)
-        
-        # Ensure the upload directory exists
-        os.makedirs(target_folder, exist_ok=True)
-        
-        # Generate the summary from the PowerPoint files in the target folder
-        project_data = aggregate_and_summarize(target_folder)
-        
-        # Check if we have any data to show
-        if not project_data or (not project_data.get("activities") and not project_data.get("upcoming_events")):
-            raise HTTPException(status_code=400, detail="Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier.")
-        
-        # Set the output filename
-        output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
-        if folder_name:
-            output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
-        
-        # Update the template with the project data using the new format
-        summarized_file_path = update_table_with_project_data(
-            pptx_path=os.getenv("TEMPLATE_FILE"),  # Template file 
-            slide_index=0,  # first slide
-            table_shape_index=0,  # index of the table
-            project_data=project_data,
-            output_path=output_filename
-        )
-
-        # Return the download URL
-        filename = os.path.basename(summarized_file_path)
-        return {"download_url": f"http://localhost:5050/download/{filename}"}
-    
+        return summarize_ppt(folder_name)
     except Exception as e:
         # Log the exception for debugging
         print(f"Error in summarize_folder: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Une erreur s'est produite: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Summarize error: {str(e)}")
 
 # Testing the function with : 
 #  curl -X GET "http://localhost:5050/get_slide_structure/CRA_SERVICE_CYBER.pptx"
 @app.get("/get_slide_structure/{foldername}")
-async def get_slide_structure(foldername: str):
+async def get_structure(foldername: str):
     """
-    Analyse tous les fichiers PPTX présents dans le dossier pptx_folder.
+    Analyse tous les fichiers PPTX présents dans le dossier spécifié et fusionne leurs données
+    en une structure unique de projets, avec les événements à venir regroupés par service.
+
+    Args:
+        foldername (str): Nom du dossier contenant les fichiers PPTX
 
     Returns:
-        dict: Un dictionnaire contenant les structures des présentations analysées.
+        dict: Un dictionnaire contenant les projets fusionnés et les événements à venir par service.
 
     Raises:
         HTTPException: Si aucun fichier PPTX n'est trouvé.
     """
-    folder_path = os.path.join(UPLOAD_FOLDER,foldername)
-    if not os.path.exists(folder_path):
-        raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
-
-    # Liste tous les fichiers dans le dossier
-    pptx_files = [f for f in os.listdir(folder_path) if f.endswith(".pptx")]
-
-    # Si aucun fichier PPTX n'est trouvé, renvoyer un message
-    if not pptx_files:
-        return {"message": "Aucun fichier PPTX fourni."}
-
-    # Analyse chaque fichier PPTX
-    results = []
-    for filename in pptx_files:
-        file_path = os.path.join(folder_path, filename)
-        
-        try:            
-            # Extraire les données sur les projets
-            project_data = extract_projects_from_presentation(file_path)
-            
-            # Ajouter les deux ensembles de données au résultat
-            results.append({
-                "filename": filename, 
-                "project_data": project_data
-            })
-        except Exception as e:
-            results.append({"filename": filename, "error": f"Erreur lors de l'analyse: {str(e)}"})
-    return {"presentations": results}
+    try:
+        return get_slide_structure(foldername)
+    except Exception as e:
+        print(f"Error in slide_structure : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Slide structure error: {str(e)}")
 
 
 #  curl -X GET "http://localhost:5050/get_slide_structure_wcolor/CRA_SERVICE_CYBER.pptx"
 @app.get("/get_slide_structure_wcolor/{filename}")
-async def get_slide_structure_wcolor(filename: str):
+async def structure_wcolor(filename: str):
     """
     Endpoint to get the structure of a slide presentation with colors detection.
 
@@ -136,13 +80,11 @@ async def get_slide_structure_wcolor(filename: str):
     Raises:
         HTTPException: If the file does not exist, a 404 error is raised.
     """
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    slides_data = analyze_presentation_with_colors(file_path)
-    return {"filename": filename, "slide data": slides_data}
+    try:
+        return get_slide_structure_wcolor(filename)
+    except Exception as e:
+        print(f"Error in slide_structure_wcolor : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Slide structure wcolor error: {str(e)}")
 
 # Testing the function with : 
 #  curl -OJ http://localhost:5050/download/TEST_FILE.pptx
@@ -169,7 +111,7 @@ async def download_file(filename: str):
     )
 
 @app.delete("/delete_all_pptx_files/{foldername}")
-async def delete_all_pptx_files(foldername:str):
+async def delete_files(foldername:str):
     """
     Supprime tous les fichiers du dossier pptx_folder.
 
@@ -179,25 +121,11 @@ async def delete_all_pptx_files(foldername:str):
     Raises:
         HTTPException: Si le dossier n'existe pas.
     """
-    pptx_folder = os.path.join(UPLOAD_FOLDER, foldername)
-    if not os.path.exists(pptx_folder):
-        raise HTTPException(status_code=404, detail="Le dossier pptx_folder n'existe pas.")
-
-    # Liste des fichiers dans le dossier
-    files = os.listdir(pptx_folder)
-    
-    if not files:
-        return {"message": "Aucun fichier à supprimer."}
-
-    # Suppression des fichiers un par un
-    for file in files:
-        file_path = os.path.join(pptx_folder, file)
-        try:
-            os.remove(file_path)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression de {file}: {str(e)}")
-
-    return {"message": f"{len(files)} fichiers supprimés avec succès."}
+    try:
+        return delete_all_pptx_files(foldername)
+    except Exception as e:
+        print(f"Erreur lors de la suppression : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Deletion error : {str(e)}")
 
 
 def run():
