@@ -3,6 +3,7 @@ import re
 import json
 from pptx import Presentation
 from langchain_core.prompts import PromptTemplate
+from copy import deepcopy
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -90,20 +91,16 @@ def aggregate_and_summarize(pptx_folder):
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
     
     Returns:
-      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
+      dict: A nested dictionary with project/subproject structure containing information and alerts
     """
-    project_data = {}
+    # New project structure
+    aggregated_data = {}
     file_count = 0
     
     # Check if the folder exists
     if not os.path.exists(pptx_folder):
         print(f"Warning: Folder {pptx_folder} does not exist.")
-        return {
-            "activities": {},
-            "upcoming_events": {
-                "General": "Aucun événement particulier prévu."
-            }
-        }
+        return {}
     
     # Get all PPTX files in the folder
     for filename in os.listdir(pptx_folder):
@@ -114,132 +111,68 @@ def aggregate_and_summarize(pptx_folder):
                 file_project_data = extract_projects_from_presentation(file_path)
                 file_count += 1
                 
-                # Process activities from file_project_data
-                if "activities" in file_project_data:
-                    for project_name, project_info in file_project_data["activities"].items():
-                        # If the project already exists, merge the information
-                        if project_name in project_data:
-                            # Merge information
-                            if "information" in project_info and project_info["information"]:
-                                if "information" not in project_data[project_name]:
-                                    project_data[project_name]["information"] = project_info["information"]
-                                else:
-                                    project_data[project_name]["information"] += "\n" + project_info["information"]
-                            
-                            # Merge alerts
-                            if "alerts" in project_info:
-                                if "alerts" not in project_data[project_name]:
-                                    project_data[project_name]["alerts"] = {
-                                        "advancements": [],
-                                        "small_alerts": [],
-                                        "critical_alerts": []
-                                    }
-                                
-                                # Merge advancements
-                                if "advancements" in project_info["alerts"]:
-                                    project_data[project_name]["alerts"]["advancements"].extend(
-                                        project_info["alerts"]["advancements"]
+                # Process projects data from file_project_data
+                if "projects" in file_project_data:
+                    for main_project, subprojects in file_project_data["projects"].items():
+                        # Ensure the main project exists in aggregated data
+                        if main_project not in aggregated_data:
+                            aggregated_data[main_project] = {}
+                        
+                        # Process each subproject
+                        for subproject_name, subproject_info in subprojects.items():
+                            # If the subproject already exists, merge information
+                            if subproject_name in aggregated_data[main_project]:
+                                # Merge information text
+                                if "information" in subproject_info and subproject_info["information"]:
+                                    existing_info = aggregated_data[main_project][subproject_name].get("information", "")
+                                    aggregated_data[main_project][subproject_name]["information"] = (
+                                        existing_info + "\n" + subproject_info["information"] if existing_info else subproject_info["information"]
                                     )
                                 
-                                # Merge small alerts
-                                if "small_alerts" in project_info["alerts"]:
-                                    project_data[project_name]["alerts"]["small_alerts"].extend(
-                                        project_info["alerts"]["small_alerts"]
-                                    )
+                                # Merge alerts
+                                for alert_type in ["critical", "small", "advancements"]:
+                                    if alert_type in subproject_info and subproject_info[alert_type]:
+                                        aggregated_data[main_project][subproject_name][alert_type].extend(
+                                            subproject_info[alert_type]
+                                        )
                                 
-                                # Merge critical alerts
-                                if "critical_alerts" in project_info["alerts"]:
-                                    project_data[project_name]["alerts"]["critical_alerts"].extend(
-                                        project_info["alerts"]["critical_alerts"]
+                                # Merge upcoming events
+                                if "upcoming_events" in subproject_info and subproject_info["upcoming_events"]:
+                                    aggregated_data[main_project][subproject_name]["upcoming_events"].extend(
+                                        [event for event in subproject_info["upcoming_events"] 
+                                         if event not in aggregated_data[main_project][subproject_name]["upcoming_events"]]
                                     )
-                        else:
-                            # Add new project
-                            project_data[project_name] = project_info
-                
-                # Add upcoming_events if available
-                if "upcoming_events" in file_project_data:
-                    if "upcoming_events" not in project_data:
-                        project_data["upcoming_events"] = file_project_data["upcoming_events"]
-                    else:
-                        project_data["upcoming_events"] += "\n" + file_project_data["upcoming_events"]
+                            else:
+                                # Add new subproject
+                                aggregated_data[main_project][subproject_name] = deepcopy(subproject_info)
             except Exception as e:
                 print(f"Error processing file {filename}: {str(e)}")
     
     # If no files were processed, return empty data structure
     if file_count == 0:
-        return {
-            "activities": {},
-            "upcoming_events": {
-                "General": "Aucun événement particulier prévu."
-            }
-        }
+        return {}
     
-    # Prepare the data to send to the LLM
-    processed_data = {
-        "projects": {},
-        "events": project_data.get("upcoming_events", "")
+    # Prepare the data to send to the LLM for summarization if needed
+    prompt_inputs = {
+        "project_data": json.dumps(aggregated_data, indent=2, ensure_ascii=False)
     }
-    
-    # Extract essential information from each project
-    for project_name, project_info in project_data.items():
-        # Skip the "upcoming_events" key as it's not a project
-        if project_name == "upcoming_events":
-            continue
-        
-        processed_data["projects"][project_name] = {
-            "information": project_info.get("information", "").strip(),
-            "advancements": project_info.get("alerts", {}).get("advancements", []),
-            "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
-            "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
-        }
     
     # Create a prompt template for the LLM
     summarization_template = PromptTemplate.from_template("""
-    Tu es un assistant chargé de résumer des informations de projets et de les formater dans un JSON spécifique.
+    Tu es un assistant chargé de résumer des informations de projets et de les formater.
 
     Voici les données des projets:
     {project_data}
     
-    Voici les événements à venir:
-    {events_data}
-
-    Crée un résumé concis pour chaque projet et organise les informations selon le format JSON suivant:
-    ```json
-    {{
-      "activities": {{
-        "Nom du Projet": {{
-          "summary": "Résumé concis des informations principales du projet en une ou deux phrases",
-          "alerts": {{
-            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
-            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
-            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
-          }}
-        }},
-        // Autres projets...
-      }},
-      "upcoming_events": {{
-        "Catégorie1": "Description des événements à venir pour cette catégorie",
-        "Catégorie2": "Description des événements à venir pour cette catégorie",
-        // Autres catégories...
-      }}
-    }}
-    ```
-
-    Assure-toi de:
-    1. Créer un résumé synthétique et informatif pour chaque projet
-    2. Conserver les informations essentielles des alertes (advancements, small_alerts, critical_alerts)
-    3. Organiser les événements à venir par catégories pertinentes (ex: Cybersecurity, UX/UI Design, Consulting)
-    4. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
-    5. Assure toi que tout soit en Français.
-
-    Les alertes ne doivent contenir que les points vraiment importants, pas besoin de tout inclure.
-    """)
+    Analyse ces données et identifie les points clés pour chaque projet et sous-projet.
+    Pour chaque entrée, tu peux conserver la structure mais synthétise les informations
+    pour qu'elles soient plus concises tout en préservant les détails importants.
     
-    # Prepare the inputs for the prompt
-    prompt_inputs = {
-        "project_data": json.dumps(processed_data["projects"], indent=2, ensure_ascii=True),
-        "events_data": processed_data["events"]
-    }
+    Les alertes critiques, alertes mineures et avancements doivent être conservés tels quels,
+    mais tu peux éliminer les redondances éventuelles.
+    
+    Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
+    """)
     
     # Generate the prompt
     prompt = summarization_template.format(**prompt_inputs)
@@ -259,53 +192,12 @@ def aggregate_and_summarize(pptx_folder):
         json_str = json_str.strip()
         result = json.loads(json_str)
         
-        # Ensure the expected structure exists
-        if "activities" not in result:
-            result["activities"] = {}
-        if "upcoming_events" not in result:
-            result["upcoming_events"] = {"General": "Aucun événement particulier prévu."}
-        
         return result
         
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
-        # Create a basic structure with the raw data as fallback
-        result = {
-            "activities": {},
-            "upcoming_events": {}
-        }
-        
-        # Process upcoming events
-        upcoming_texts = project_data.get("upcoming_events", "")
-        if upcoming_texts:
-            # Try to identify categories in the text
-            categories = re.findall(r"([A-Za-z0-9/]+):\s*([^:]+?)(?=\n[A-Za-z0-9/]+:|$)", upcoming_texts, re.DOTALL)
-            
-            if categories:
-                for category, text in categories:
-                    result["upcoming_events"][category.strip()] = text.strip()
-            else:
-                result["upcoming_events"]["General"] = upcoming_texts.strip()
-        else:
-            result["upcoming_events"]["General"] = "Aucun événement particulier prévu."
-        
-        # Process projects without LLM summarization
-        for project_name, project_info in project_data.items():
-            if project_name == "upcoming_events":
-                continue
-                
-            summary = project_info.get("information", "").strip()
-            
-            result["activities"][project_name] = {
-                "summary": summary if summary else "Aucune information disponible.",
-                "alerts": {
-                    "advancements": project_info.get("alerts", {}).get("advancements", []),
-                    "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
-                    "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
-                }
-            }
-        
-        return result
+        # If summarization fails, return the raw aggregated data
+        return aggregated_data
 
 if __name__ == "__main__":
     folder = "pptx_folder"  # Update with your actual folder path

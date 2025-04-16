@@ -19,7 +19,7 @@ def update_table_cell(pptx_path, slide_index, table_shape_index, row, col, new_t
       new_text (str): New text to insert into the cell.
       output_path (str): Path to save the updated .pptx file.
     """
-    os.makedirs(os.getenv("OUTPUT_FOLDER"), exist_ok=True)
+    os.makedirs(os.getenv("OUTPUT_FOLDER", "OUTPUT"), exist_ok=True)
     # Load the presentation
     prs = Presentation(pptx_path)
     
@@ -61,7 +61,7 @@ def update_table_multiple_cells(pptx_path, slide_index, table_shape_index, updat
         {'row': 3, 'col': 0, 'text': 'Upcoming work information'}
     ]
     """
-    os.makedirs(os.getenv("OUTPUT_FOLDER"), exist_ok=True)
+    os.makedirs(os.getenv("OUTPUT_FOLDER", "OUTPUT"), exist_ok=True)
     # Load the presentation
     prs = Presentation(pptx_path)
     
@@ -112,31 +112,33 @@ def merge_vertical(first_cell, cells):
     for cell in cells:
         first_cell.merge(cell)
 
-def update_table_with_project_data(pptx_path, slide_index, table_shape_index, project_data, output_path):
+def update_table_with_project_data(pptx_path, slide_index, table_shape_index, project_data, output_path, upcoming_events=None):
     """
-    Updates a table in a PowerPoint slide with project information using the new JSON format.
-    Supports colored text for different types of alerts.
+    Updates a table in a PowerPoint slide with project information using the new nested JSON format.
+    Supports colored text for different types of alerts and multi-level project hierarchies.
     
     Parameters:
       pptx_path (str): Path to the input .pptx file.
       slide_index (int): Index of the slide containing the table.
       table_shape_index (int): Index of the shape that is the table on that slide.
-      project_data (dict): Project data in the new JSON format with activities and upcoming_events.
+      project_data (dict): Project data in the nested format with multi-level hierarchy.
+                          Should be directly the content of the "projects" field.
       output_path (str): Path to save the updated .pptx file.
+      upcoming_events (dict, optional): Dictionary of upcoming events by service.
     
     The table is organized as follows:
-      - Column 1: Project names (each project in a separate row)
+      - Column 1: Project and subproject names with indentation by level
       - Column 2: Project information with colored text
           * Black: Common information
           * Green: Advancements
           * Orange: Small alerts
           * Red: Critical alerts
-      - Column 3: Upcoming events (all in one row)
+      - Column 3: Upcoming events by service
       
     Returns:
       str: Path to the saved output file
     """
-    os.makedirs(os.getenv("OUTPUT_FOLDER"), exist_ok=True)
+    os.makedirs(os.getenv("OUTPUT_FOLDER", "OUTPUT"), exist_ok=True)
     
     # Load the presentation
     prs = Presentation(pptx_path)
@@ -152,83 +154,124 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
     table = slide.shapes[table_shape_index].table
     
     # Start from row 1 (assuming row 0 might be headers)
-    current_row, row_start = 1, 1
-
-    cell_to_merge = []
+    current_row = 1
     
-    # Process each project and add to the table
-    if "activities" in project_data:
-        for project_name, project_info in project_data["activities"].items():
+    # Fonction récursive pour ajouter les projets à tous les niveaux
+    def add_project_level(projects, level=0):
+        nonlocal current_row, table
+        
+        for project_name, content in projects.items():
+            # Déterminer si c'est un niveau terminal (avec des données) ou un container
+            is_terminal = "information" in content
+            
             # If we need more rows in the table, add them
             while current_row >= len(table.rows):
                 add_row(table)
-                cell_to_merge += [table.rows[current_row].cells[2]]
             
-            # Set project name in column 0
+            # Calculate indentation based on level
+            indent = "  " * level
+            
+            # Set project name in column 0 with proper indentation
             cell = table.cell(current_row, 0)
-            cell.text = project_name
+            cell.text = f"{indent}{project_name}"
             
-            # Process project information for column 1
-            info_cell = table.cell(current_row, 1)
-            # Clear existing text
-            info_cell.text = ""
+            # Apply formatting based on level
+            for paragraph in cell.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    if level == 0:
+                        # Top level projects in bold
+                        run.font.bold = True
+                    elif level > 1:
+                        # Deeper level projects in italic
+                        run.font.italic = True
             
-            # Add information with formatted text
-            tf = info_cell.text_frame
-            
-            # Add summary text (black)
-            if "summary" in project_info:
-                p = tf.add_paragraph()
-                run = p.add_run()
-                run.text = project_info["summary"]
-            
-            # Add alerts with appropriate colors
-            if "alerts" in project_info:
-                alerts = project_info["alerts"]
+            if is_terminal:
+                # Process project information for column 1
+                info_cell = table.cell(current_row, 1)
+                info_cell.text = ""
                 
-                # Add advancements (green)
-                if alerts.get("advancements") and len(alerts["advancements"]) > 0:
+                # Add information with formatted text
+                tf = info_cell.text_frame
+                
+                # Add summary/information text (black)
+                if "information" in content and content["information"]:
                     p = tf.add_paragraph()
                     run = p.add_run()
-                    run.text = "\n".join(alerts["advancements"])
+                    run.text = content["information"]
+                
+                # Add advancements (green)
+                if "advancements" in content and content["advancements"]:
+                    p = tf.add_paragraph()
+                    run = p.add_run()
+                    run.text = "\n".join(content["advancements"])
                     run.font.color.rgb = RGBColor(0, 128, 0)  # Green
                 
                 # Add small alerts (orange)
-                if alerts.get("small_alerts") and len(alerts["small_alerts"]) > 0:
+                if "small" in content and content["small"]:
                     p = tf.add_paragraph()
                     run = p.add_run()
-                    run.text = "\n".join(alerts["small_alerts"])
+                    run.text = "\n".join(content["small"])
                     run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
                 
                 # Add critical alerts (red)
-                if alerts.get("critical_alerts") and len(alerts["critical_alerts"]) > 0:
+                if "critical" in content and content["critical"]:
                     p = tf.add_paragraph()
                     run = p.add_run()
-                    run.text = "\n".join(alerts["critical_alerts"])
+                    run.text = "\n".join(content["critical"])
                     run.font.color.rgb = RGBColor(255, 0, 0)  # Red
-            
-            table.rows[current_row].height = Pt(12)
-            current_row += 1
-    row_end = current_row - 1
-    if row_end > row_start:
-        table.cell(row_start, 2).merge(table.cell(row_end, 2))
-    # Add upcoming events in column 2
-    if "upcoming_events" in project_data:
-        # Add events text to first row, column 2
-        events_cell = table.cell(1, 2)
-        events_cell.text = ""
+                
+                table.rows[current_row].height = Pt(12)
+                current_row += 1
+            else:
+                # Empty cells for columns 1 and 2
+                info_cell = table.cell(current_row, 1)
+                info_cell.text = ""
+                
+                events_cell = table.cell(current_row, 2)
+                events_cell.text = ""
+                
+                current_row += 1
+                
+                # Process next level recursively
+                add_project_level(content, level + 1)
+    
+    # Process all projects recursively
+    add_project_level(project_data)
+    
+    # Ajouter une section pour les événements à venir par service
+    if upcoming_events:
+        # Si nous sommes à la fin de la table, ajouter une ligne pour le titre
+        while current_row >= len(table.rows):
+            add_row(table)
         
-        tf = events_cell.text_frame
-        p = tf.add_paragraph()
-        run = p.add_run()
-        run.text = "Événements à venir:\n\n"
-        
-        # Add each event category 
-        for category, event_text in project_data["upcoming_events"].items():
-            p = tf.add_paragraph()
-            run = p.add_run()
-            run.text = f"{category}: {event_text}"
-            p.level = 1  # Add a bit of indentation
+        # Ajouter les événements par service
+        for service_name, events in upcoming_events.items():
+            if events:
+                while current_row >= len(table.rows):
+                    add_row(table)
+                
+                # Ajouter le nom du service
+                service_cell = table.cell(current_row, 0)
+                service_cell.text = service_name
+                for paragraph in service_cell.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.bold = True
+                
+                # Ajouter les événements
+                events_cell = table.cell(current_row, 1)
+                events_cell.text = ""
+                
+                tf = events_cell.text_frame
+                for event in events:
+                    p = tf.add_paragraph()
+                    run = p.add_run()
+                    run.text = event
+                
+                # # Fusionner les colonnes restantes
+                if len(table.columns) >= 3:
+                    events_cell.merge(table.cell(current_row, 2))
+                
+                current_row += 1
     
     # Save the presentation
     prs.save(output_path)

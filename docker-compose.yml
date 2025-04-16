@@ -21,6 +21,8 @@ services:
       - ./pipelines:/app/pipelines
       - ./open-webui/uploads:/app/uploads # get the uploaded files
       - ./pptx_folder:/app/pptx_folder
+      - ./templates:/app/templates
+      - ./OUTPUT:/app/OUTPUT
       - ./src:/app/src
     environment:
       # - API_URL=http://host.docker.internal:5050 # API URL 
@@ -29,18 +31,20 @@ services:
     networks:
       - webui-net
   fastapi:
-      build:
-        context: .
-        dockerfile: Dockerfile.api
-      container_name: fastapi_app
-      ports:
-        - "5050:5050"
-      volumes:
-        - .:/app  
-      depends_on:
-        - pipelines
-      networks:
-        - webui-net
+    profiles:
+      - api
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fastapi_app
+    ports:
+      - "5050:5050"
+    volumes:
+      - .:/app  
+    depends_on:
+      - pipelines
+    networks:
+      - webui-net
 
 networks:
   webui-net:
