@@ -167,12 +167,10 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
             # Set project name in column 0
             cell = table.cell(current_row, 0)
             cell.text = project_name
-            
             # Process project information for column 1
             info_cell = table.cell(current_row, 1)
             # Clear existing text
             info_cell.text = ""
-            
             # Add information with formatted text
             tf = info_cell.text_frame
             tf.clear()  # Ensure text frame is completely cleared
@@ -186,6 +184,7 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
                     p = tf.paragraphs[0]
                 run = p.add_run()
                 run.text = project_info["summary"]
+                run.font.size = Pt(11)
             
             # Add alerts with appropriate colors
             if "alerts" in project_info:
@@ -211,8 +210,7 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
                     run = p.add_run()
                     run.text = "\n".join(alerts["critical_alerts"])
                     run.font.color.rgb = RGBColor(255, 0, 0)  # Red
-            
-            table.rows[current_row].height = Pt(12)
+            table.rows[current_row].height = Pt(11)
             current_row += 1
     row_end = current_row - 1
     if row_end > row_start:
@@ -222,7 +220,6 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
         # Add events text to first row, column 2
         events_cell = table.cell(1, 2)
         events_cell.text = ""
-        
         tf = events_cell.text_frame
         tf.clear()  # Ensure text frame is completely cleared
         
