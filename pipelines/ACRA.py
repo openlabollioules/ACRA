@@ -8,13 +8,13 @@ from langchain_ollama import  OllamaLLM
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
 from core import summarize_ppt, get_slide_structure, delete_all_pptx_files
+from services import merge_pptx_files
 
 from OLLibrary.utils.text_service import remove_tags_keep
 
 load_dotenv()
 
 class Pipeline:
-
     def __init__(self):
 
         self.last_response = None
@@ -394,6 +394,17 @@ class Pipeline:
             self.last_response = response
             return
 
+        elif "/merge" in message:
+            folderpath = os.path.join("./pptx_folder", self.chat_id)
+            response = merge_pptx_files(folderpath, os.path.join("./OUTPUT", self.chat_id, "merged_presentation.pptx"))
+            if "error" in response:
+                response = f"Erreur lors de la fusion des fichiers: {response['error']}"
+            else:
+                response = "Les fichiers ont été fusionnés avec succès." + response
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
         # Ajouter la dernière réponse au contexte si elle existe
         if user_message:
             user_message += f"\n\n *Last response generated :* {self.last_response}"
@@ -403,6 +414,8 @@ class Pipeline:
             /summarize --> Résume tous les fichiers pptx envoyé  
             /structure --> Renvoie la structure des fichiers 
             /clear --> Retire tous les fichiers de la conversation
+            /generate --> genere tout le pptx en fonction du texte ( /generate [Avancements de la semaine])
+            /merge --> Fusionne tous les fichiers pptx envoyés
             """
             self.last_response = commands
             yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"

@@ -30,21 +30,21 @@ services:
       
     networks:
       - webui-net
-  fastapi:
-    profiles:
-      - api
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: fastapi_app
-    ports:
-      - "5050:5050"
-    volumes:
-      - .:/app  
-    depends_on:
-      - pipelines
-    networks:
-      - webui-net
+  # fastapi:
+  #   profiles:
+  #     - api
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.api
+  #   container_name: fastapi_app
+  #   ports:
+  #     - "5050:5050"
+  #   volumes:
+  #     - .:/app  
+  #   depends_on:
+  #     - pipelines
+  #   networks:
+  #     - webui-net
 
 networks:
   webui-net:
