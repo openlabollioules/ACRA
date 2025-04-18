@@ -3,6 +3,7 @@ import os
 import sys
 import shutil
 import requests
+import uuid
 from typing import List, Union, Generator, Iterator, Dict, Any
 from langchain_ollama import  OllamaLLM
 from dotenv import load_dotenv
@@ -11,12 +12,19 @@ from core import summarize_ppt, get_slide_structure, delete_all_pptx_files
 from services import merge_pptx_files
 
 from OLLibrary.utils.text_service import remove_tags_keep
+from OLLibrary.utils.log_service import setup_logging, get_logger
+from services import cleanup_orphaned_folders
+import logging
 
+# Set up the main application logger
+setup_logging(app_name="ACRA_Pipeline")
 load_dotenv()
+# Use a specific logger for this module
+log = get_logger(__name__)
 
 class Pipeline:
     def __init__(self):
-
+        log.info("Initializing ACRA Pipeline")
         self.last_response = None
 
         self.use_api = False
@@ -34,31 +42,88 @@ class Pipeline:
 
         self.chat_id = ""
         self.current_chat_id = ""  # To track conversation changes
-
+        self.small_model = OllamaLLM(model="gemma3:latest", base_url="http://host.docker.internal:11434", num_ctx=64000)
         self.system_prompt = ""
         self.message_id = 0
         
         # Variable pour stocker la structure traitée
         self.cached_structure = None
 
+        # State tracking
+        self.waiting_for_confirmation = False
+        self.confirmation_command = ""
+        self.confirmation_additional_info = ""
+        log.info("ACRA Pipeline initialized successfully")
+
+    def generate_report(self, foldername, info):
+        """
+        Génère un rapport à partir du texte fourni en utilisant une requête POST.
+        
+        Args:
+            foldername (str): Le nom du dossier où stocker le rapport
+            info (str): Le texte à analyser pour générer le rapport
+            
+        Returns:
+            dict: Résultat de la requête avec l'URL de téléchargement
+        """
+        url = f"{self.api_url}/generate_text_report/{foldername}"
+        data = {"info": info}
+        return self.post(url, data=json.dumps(data), headers={"Content-Type": "application/json"})
+
+        # State tracking
+        self.waiting_for_confirmation = False
+        self.confirmation_command = ""
+        self.confirmation_additional_info = ""
+        log.info("ACRA Pipeline initialized successfully")
+
+    def generate_report(self, foldername, info):
+        """
+        Génère un rapport à partir du texte fourni en utilisant une requête POST.
+        
+        Args:
+            foldername (str): Le nom du dossier où stocker le rapport
+            info (str): Le texte à analyser pour générer le rapport
+            
+        Returns:
+            dict: Résultat de la requête avec l'URL de téléchargement
+        """
+        url = f"{self.api_url}/generate_text_report/{foldername}"
+        data = {"info": info}
+        return self.post(url, data=json.dumps(data), headers={"Content-Type": "application/json"})
+
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""
+        log.info(f"Resetting conversation state for chat_id: {self.chat_id}")
         self.last_response = None
         self.system_prompt = ""
         self.file_path_list = []
         self.message_id = 0
+        self.waiting_for_confirmation = False
+        self.confirmation_command = ""
+        self.confirmation_additional_info = ""
         self.cached_structure = None
 
     def fetch(self, endpoint):
             """Effectue une requête GET synchrone"""
             url = f"{self.api_url}/{endpoint}"
+            log.debug(f"Fetching from: {url}")
             response = requests.get(url)
+            if response.status_code != 200:
+                log.error(f"API request failed: {response.status_code} - {response.text}")
             return response.json() if response.status_code == 200 else {"error": "Request failed"}
 
-    def post(self, endpoint, data=None, files=None):
+    def post(self, endpoint, data=None, files=None, headers=None):
         """Effectue une requête POST synchrone"""
-        url = f"{self.api_url}/{endpoint}"
-        response = requests.post(url, data=data, files=files)
+        # Si l'endpoint commence par http, on le considère comme une URL complète
+        if endpoint.startswith("http"):
+            url = endpoint
+        else:
+            # Sinon on le préfixe avec l'URL de l'API
+            url = f"{self.api_url}/{endpoint}"
+        log.debug(f"Posting to: {url}")
+        response = requests.post(url, data=data, files=files, headers=headers)
+        if response.status_code != 200:
+            log.error(f"API POST request failed: {response.status_code} - {response.text}")
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
     def summarize_folder(self, foldername=None):
@@ -258,7 +323,10 @@ class Pipeline:
         return [f for f in os.listdir(folder_path) if f.lower().endswith(".pptx")]
 
     async def inlet(self, body: dict, user: dict) -> dict:
-        print(f"Received body: {body}")
+        log.info(f"Received body: {body}")
+        
+        # Debug log the current state
+        log.info(f"Current state - self.chat_id: '{self.chat_id}', self.current_chat_id: '{self.current_chat_id}'")
         
         # Get conversation ID from body
         if body.get("metadata", {}).get("chat_id") != None:
@@ -310,6 +378,45 @@ class Pipeline:
         
         return body
 
+    def get_existing_summaries(self, folder_name=None):
+        """
+        Récupère la liste des fichiers de résumé existants pour le chat_id actuel.
+        
+        Args:
+            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
+        
+        Returns:
+            list: Liste des tuples (filename, url) des résumés.
+        """
+        if folder_name is None:
+            folder_name = self.chat_id
+        log.info(f"ACRA - Pipeline: Getting existing summaries for folder: {folder_name}")
+        output_folder = os.getenv("OUTPUT_FOLDER", "OUTPUT")
+        log.info(f"ACRA - Pipeline: Output folder: {output_folder}")
+        summaries = []
+        folder_path = os.path.join(output_folder, folder_name)
+        log.info(f"ACRA - Pipeline: Folder path: {folder_path}")
+        log.info(f"ACRA - Pipeline: Folder exists: {os.path.exists(folder_path)}")
+        os.makedirs(folder_path, exist_ok=True)
+        log.info(f"ACRA - Pipeline: Makedirs: {folder_path}")
+        
+        try:
+            # List all files in the current chat folder
+            files = os.listdir(folder_path)
+            log.info(f"ACRA - Pipeline: All files in directory: {files}")
+            for filename in files:
+                log.info(f"ACRA - Pipeline: Processing file: {filename}")
+                if filename and filename.endswith(".pptx"):
+                    download_url = f"http://localhost:5050/download/{folder_name}/{filename}"
+                    log.info(f"ACRA - Pipeline: Download URL: {download_url}")
+                    summaries.append((filename, download_url))
+            log.info(f"ACRA - Pipeline: Final summaries list: {summaries}")
+        except Exception as e:
+            log.error(f"ACRA - Pipeline: Error listing files: {str(e)}")
+            log.error(f"ACRA - Pipeline: Current working directory: {os.getcwd()}")
+            log.error(f"ACRA - Pipeline: Absolute folder path: {os.path.abspath(folder_path)}")
+        
+        return summaries
 
     def pipe(self, body: dict, user_message: str, model_id: str, messages: List[dict]) -> Generator[str, None, None]:
         """
@@ -335,19 +442,82 @@ class Pipeline:
         message = user_message.lower()  # Convertir en minuscules pour simplifier la correspondance
         __event_emitter__ = body.get("__event_emitter__")
 
-        # Gestion des commandes spécifiques (/summarize, /structure, /clear)
-        if "/summarize" in message:
-            # No filename provided, summarize all files by default
-            response = self.summarize_folder()
-            if "error" in response:
-                response = f"Erreur lors de la génération du résumé: {response['error']}"
-            else:
-                response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+        # Check if we're waiting for confirmation
+        if self.waiting_for_confirmation:
+            if message in ["yes", "y", "oui", "o"]:
+                self.waiting_for_confirmation = False
+                
+                # If we were waiting for summarize confirmation
+                if self.confirmation_command == "summarize":
+                    # Generate a new summary
+                    response = self.summarize_folder(additional_info=self.confirmation_additional_info)
+                    if "error" in response:
+                        response = f"Erreur lors de la génération du résumé: {response['error']}"
+                    else:
+                        response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+                    
+                    yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                    self.last_response = response
+                    return
             
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
-            return
+            elif message in ["no", "n", "non"]:
+                self.waiting_for_confirmation = False
+                response = "Génération de résumé annulée."
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            
+            # Reset if we get any other input
+            self.waiting_for_confirmation = False
+        
+        # Gestion des commandes spécifiques
+        if "/summarize" in message:
+            # Extract additional information after the /summarize command
+            additional_info = None
+            if " " in message:
+                command_parts = message.split(" ", 1)
+                if len(command_parts) > 1 and command_parts[1].strip():
+                    additional_info = command_parts[1].strip()
+            
+            # Get existing summaries
+            existing_summaries = self.get_existing_summaries()
+            log.info(f"ACRA - Pipeline: Existing summaries: {existing_summaries}")
+            
+            if existing_summaries:
+                response = "Voici les résumés existants pour cette conversation:\n\n"
+                for filename, url in existing_summaries:
+                    response += f"- {filename}: {url}\n"
+                
+                response += "\nVoulez-vous générer un nouveau résumé? (Oui/Non)"
+                
+                # Set state to wait for confirmation
+                self.waiting_for_confirmation = True
+                self.confirmation_command = "summarize"
+                self.confirmation_additional_info = additional_info
+                
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            else:
+                # No existing summaries, generate one directly
+                response = self.summarize_folder(additional_info=additional_info)
+                if "error" in response:
+                    response = f"Erreur lors de la génération du résumé: {response['error']}"
+                else:
+                    introduction_prompt = f"""Tu es un assistant qui va générer une introduction pour un enssemble de fichiers PPTX je veux juste une description globale des fichiers impliqués dans le message de 
+                l'utilisateur pas de cas par cas et sourtout quelque chose de consit et renvoie uniquement l'introduction (pas d'explication) si tu vois une information importante ou une alerte critique, tu dois 
+                la signaler dans l'introduction. Voici le contenu de tous les fichiers : {self.system_prompt} Tu dois renvoyer uniquement l'introduction (pas d'explication).
+                """
+                introduction = self.small_model.invoke(introduction_prompt)
+                response = f"{introduction}\n\n Le résumé de tous les fichiers a été généré avec succès.\n\n  ### URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
+                
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
         
         elif "/structure" in message:
             if self.cached_structure is None:
@@ -379,6 +549,26 @@ class Pipeline:
                 yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
                 self.last_response = self.cached_structure
                 return
+        elif "/generate" in message:
+            # Extraire le texte après la commande
+            text_content = user_message.replace("/generate", "").strip()
+            if not text_content:
+                response = "Veuillez fournir du texte après la commande /generate pour générer un rapport."
+            else:
+                # On utilise la méthode generate_report qui maintenant fait un POST avec le texte dans le body
+                response = self.generate_report(self.chat_id, text_content)
+                if "error" in response:
+                    response = f"Erreur lors de la génération du rapport: {response['error']}"
+                else:
+                    response = f"Le rapport a été généré avec succès à partir du texte fourni.\n\n### URL de téléchargement:\n{response.get('download_url', 'Non disponible')}"
+            
+            if __event_emitter__:
+                __event_emitter__({"type": "content", "content": response})
+            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.last_response = response
+            return
+        
         elif "/clear" in message:
             response = self.delete_all_files()
             if "error" in response:
@@ -411,7 +601,7 @@ class Pipeline:
         else:
             # Afficher les commandes disponibles si aucune réponse précédente
             commands = """Les commandes sont les suivantes : \n
-            /summarize --> Résume tous les fichiers pptx envoyé  
+            /summarize [instructions] --> Affiche les résumés existants et demande confirmation avant d'en générer un nouveau. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
             /structure --> Renvoie la structure des fichiers 
             /clear --> Retire tous les fichiers de la conversation
             /generate --> genere tout le pptx en fonction du texte ( /generate [Avancements de la semaine])

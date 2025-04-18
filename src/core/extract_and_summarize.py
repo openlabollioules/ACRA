@@ -13,7 +13,7 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 
 from langchain_ollama import OllamaLLM
-summarize_model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
+summarize_model = OllamaLLM(model="deepseek-r1:32b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
 
 from analist import extract_projects_from_presentation
 from OLLibrary.utils.text_service import remove_tags_no_keep
@@ -87,13 +87,14 @@ def extract_common_and_upcoming_info(project_data):
     
     return result
 
-def aggregate_and_summarize(pptx_folder):
+def aggregate_and_summarize(pptx_folder, additional_info=""):
     """
     Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
     Uses an LLM to summarize the project information and return it in the specified JSON format.
     
     Parameters:
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
+      additional_info (str, optional): Additional information or instructions for the summarization process.
     
     Returns:
       dict: A nested dictionary with project/subproject structure containing information and alerts
@@ -436,7 +437,166 @@ def aggregate_and_summarize(pptx_folder):
         
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
-        # If summarization fails, return the raw aggregated data
+        # Create a basic structure with the raw data as fallback
+        result = {
+            "activities": {},
+            "upcoming_events": {}
+        }
+        
+        # Process upcoming events
+        upcoming_texts = project_data.get("upcoming_events", "")
+        if upcoming_texts:
+            # Try to identify categories in the text
+            categories = re.findall(r"([A-Za-z0-9/]+):\s*([^:]+?)(?=\n[A-Za-z0-9/]+:|$)", upcoming_texts, re.DOTALL)
+            
+            if categories:
+                for category, text in categories:
+                    result["upcoming_events"][category.strip()] = text.strip()
+            else:
+                result["upcoming_events"]["General"] = upcoming_texts.strip()
+        else:
+            result["upcoming_events"]["General"] = "Aucun événement particulier prévu."
+        
+        # Process projects without LLM summarization
+        for project_name, project_info in project_data.items():
+            if project_name == "upcoming_events":
+                continue
+                
+            summary = project_info.get("information", "").strip()
+            
+            result["activities"][project_name] = {
+                "summary": summary if summary else "Aucune information disponible.",
+                "alerts": {
+                    "advancements": project_info.get("alerts", {}).get("advancements", []),
+                    "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
+                    "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
+                }
+            }
+        
+        return result
+
+def Generate_pptx_from_text(pptx_folder, info=None):
+    """
+    Generate a JSON structure from text input that can be used by update_table_with_project_data.
+    Uses an LLM to process the text information and return it in the specified JSON format.
+    
+    Parameters:
+      pptx_folder (str): Path to the folder (used for compatibility, not used in processing).
+      info (str): Text information to process and structure into JSON format.
+    
+    Returns:
+      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
+    """
+    # If no info is provided, return empty structure
+    if not info:
+        return {
+            "activities": {},
+            "upcoming_events": {
+                "General": "Aucun événement particulier prévu."
+            }
+        }
+    
+    # Create a prompt template for the LLM
+    summarization_template = PromptTemplate.from_template("""
+    Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
+
+    Voici les données textuelles à analyser:
+    {text_data}
+
+    Ta tâche est d'extraire des informations sur les projets mentionnés, y compris:
+    1. Les noms des projets
+    2. Un résumé des informations principales pour chaque projet
+    3. Les avancements significatifs (points positifs)
+    4. Les alertes mineures (points à surveiller)
+    5. Les alertes critiques (problèmes urgents)
+    6. Les événements à venir pour chaque projet ou catégorie
+
+    Organise les informations selon le format JSON suivant:
+    ```json
+    {{
+      "activities": {{
+        "Nom du Projet": {{
+          "summary": "Résumé concis des informations principales du projet en une ou deux phrases",
+          "alerts": {{
+            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
+            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
+            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
+          }}
+        }},
+        // Autres projets...
+      }},
+      "upcoming_events": {{
+        "Catégorie1": "Description des événements à venir pour cette catégorie",
+        "Catégorie2": "Description des événements à venir pour cette catégorie",
+        // Autres catégories...
+      }}
+    }}
+    ```
+
+    Assure-toi de:
+    1. Identifier correctement les différents projets mentionnés dans le texte
+    2. Créer un résumé concis et informatif pour chaque projet mais ne perdez pas de points importants
+    3. Catégoriser correctement les informations en advancements, small_alerts, et critical_alerts
+    4. Organiser les événements à venir par catégories pertinentes
+    5. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
+    6. Assurer que tout soit en Français
+    7. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte.
+    8. Lorsque tu catégorises les informations elle ne doivent pas être classée dans une autre catégorie par exemple une alerte mineure ne doit pas être classée dans une alerte critique et dans une alerte mineure.
+    9. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles.
+    10. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON.
+    
+    """)
+    
+    # Prepare the inputs for the prompt
+    prompt_inputs = {
+        "text_data": info
+    }
+    
+    # Generate the prompt
+    prompt = summarization_template.format(**prompt_inputs)
+    
+    # Call the LLM to generate the summary in JSON format
+    try:
+        llm_response = summarize_model.invoke(prompt)
+        # Extract the JSON part from the response
+        llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = llm_response
+        
+        # Clean the JSON string and parse it
+        json_str = json_str.strip()
+        result = json.loads(json_str)
+        
+        # Ensure the expected structure exists
+        if "activities" not in result:
+            result["activities"] = {}
+        if "upcoming_events" not in result:
+            result["upcoming_events"] = {"General": "Aucun événement particulier prévu."}
+        
+        return result
+        
+    except Exception as e:
+        print(f"Error during LLM summarization: {str(e)}")
+        # Create a basic structure as fallback
+        result = {
+            "activities": {
+                "Général": {
+                    "summary": "Information extraite du texte fourni.",
+                    "alerts": {
+                        "advancements": [],
+                        "small_alerts": [],
+                        "critical_alerts": []
+                    }
+                }
+            },
+            "upcoming_events": {
+                "General": "Aucun événement particulier prévu."
+            }
+        }
+        
         return result
 
 if __name__ == "__main__":

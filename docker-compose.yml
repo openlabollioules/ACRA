@@ -20,10 +20,12 @@ services:
     volumes:
       - ./pipelines:/app/pipelines
       - ./open-webui/uploads:/app/uploads # get the uploaded files
+      - ./open-webui/webui.db:/app/webui.db
       - ./pptx_folder:/app/pptx_folder
       - ./templates:/app/templates
       - ./OUTPUT:/app/OUTPUT
       - ./src:/app/src
+      - ./OUTPUT:/app/OUTPUT
     environment:
       # - API_URL=http://host.docker.internal:5050 # API URL 
       - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt
