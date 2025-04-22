@@ -13,7 +13,7 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 
 from langchain_ollama import OllamaLLM
-summarize_model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
+summarize_model = OllamaLLM(model="deepseek-r1:32b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
 
 from analist import extract_projects_from_presentation
 from OLLibrary.utils.text_service import remove_tags_no_keep
@@ -437,6 +437,205 @@ def aggregate_and_summarize(pptx_folder):
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
         # If summarization fails, return the raw aggregated data
+        return result
+
+def Generate_pptx_from_text(pptx_folder, info=None):
+    """
+    Generate a JSON structure from text input that can be used by update_table_with_project_data.
+    Uses an LLM to process the text information and return it in the specified JSON format.
+    
+    Parameters:
+      pptx_folder (str): Path to the folder (used for compatibility, not used in processing).
+      info (str): Text information to process and structure into JSON format.
+    
+    Returns:
+      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
+    """
+    # If no info is provided, return empty structure
+    if not info:
+        return {
+            "projects": {},
+            "upcoming_events": {},
+            "metadata": {
+                "processed_files": 0,
+                "folder": os.path.basename(pptx_folder)
+            },
+            "source_files": []
+        }
+    
+    # Create a prompt template for the LLM
+    summarization_template = PromptTemplate.from_template("""
+    Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
+
+    Voici les données textuelles à analyser:
+    {text_data}
+
+    Ta tâche est d'extraire des informations sur les projets mentionnés, y compris:
+    1. Les noms des projets
+    2. Un résumé des informations principales pour chaque projet
+    3. Les avancements significatifs (points positifs)
+    4. Les alertes mineures (points à surveiller)
+    5. Les alertes critiques (problèmes urgents)
+    6. Les événements à venir pour chaque projet ou catégorie
+    7. Lorsque dans le summary il y a des alerts (advancements, small_alerts, critical_alerts) met entre des balises <advancements> et </advancements>, <small_alerts> et </small_alerts>, <critical_alerts> et </critical_alerts>.
+    
+    Organise les informations selon le format JSON suivant:
+    ```json
+    {{
+    "projects":{{
+        "project1":{{
+            "information":"",
+            "critical":[],
+            "small":[],
+            "advancements":[]
+        }},
+        "project2":{{
+            "subproject1":{{
+                "information":"",
+                "critical":[],
+                "small":[],
+                "advancements":[]
+            }},
+            "subproject2":{{
+                "subsubproject1":{{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                }},
+                "subsubproject2":{{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                }}
+            }}
+        }}
+    }},
+    "upcoming_events":{{
+        "service1":[],
+        "service2":[]
+    }},
+    "metadata":{{
+        "processed_files": "number (int) of processed files",
+        "fodler":"Name of the folder"
+    }},
+    "source_files":[
+        {{
+            "filename":"",
+            "service_name":"",
+            "processed":"True/False",
+            "events_counts":"number of upcoming_events found in it"
+        }},
+        {{
+            "filename":"",
+            "service_name":"",
+            "processed":"True/False",
+            "events_counts":"number of upcoming_events found in it"
+        }}
+    ]
+}}
+    ```
+
+    Assure-toi de:
+    1. Identifier correctement les différents projets mentionnés dans le texte
+    2. Créer un résumé concis et informatif pour chaque projet mais ne perdez pas de points importants
+    3. Catégoriser correctement les informations en advancements, small_alerts, et critical_alerts
+    4. Organiser les événements à venir par catégories pertinentes
+    5. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
+    6. Assurer que tout soit en Français
+    7. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte.
+    8. Lorsque tu catégorises les informations elle ne doivent pas être classée dans une autre catégorie par exemple une alerte mineure ne doit pas être classée dans une alerte critique et dans une alerte mineure.
+    9. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles.
+    10. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON.
+    
+    """)
+    
+    # Prepare the inputs for the prompt
+    prompt_inputs = {
+        "text_data": info
+    }
+    
+    # Generate the prompt
+    prompt = summarization_template.format(**prompt_inputs)
+    
+    # Call the LLM to generate the summary in JSON format
+    try:
+        llm_response = summarize_model.invoke(prompt)
+        # Extract the JSON part from the response
+        llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = llm_response
+        
+        # Clean the JSON string and parse it
+        json_str = json_str.strip()
+        result = json.loads(json_str)
+        print("result :", result)
+        print("result type :", type(result))
+        
+        return result
+        
+    except Exception as e:
+        print(f"Error during LLM summarization: {str(e)}")
+        # Create a basic structure as fallback
+        result = {
+            "projects":{
+                "project1":{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                },
+                "project2":{
+                    "subproject1":{
+                        "information":"",
+                        "critical":[],
+                        "small":[],
+                        "advancements":[]
+                    },
+                    "subproject2":{
+                        "subsubproject1":{
+                            "information":"",
+                            "critical":[],
+                            "small":[],
+                            "advancements":[]
+                        },
+                        "subsubproject2":{
+                            "information":"",
+                            "critical":[],
+                            "small":[],
+                            "advancements":[]
+                        }
+                    }
+                }
+            },
+            "upcoming_events":{
+                "service1":[],
+                "service2":[]
+            },
+            "metadata":{
+                "processed_files": "number (int) of processed files",
+                "fodler":"Name of the folder"
+            },
+            "source_files":[
+                {
+                    "filename":"",
+                    "service_name":"",
+                    "processed":"True/False",
+                    "events_counts":"number of upcoming_events found in it"
+                },
+                {
+                    "filename":"",
+                    "service_name":"",
+                    "processed":"True/False",
+                    "events_counts":"number of upcoming_events found in it"
+                }
+            ]
+        }
+                
         return result
 
 if __name__ == "__main__":

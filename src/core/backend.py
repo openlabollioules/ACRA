@@ -1,8 +1,9 @@
 import os
+import shutil
 from dotenv import load_dotenv
 from services import update_table_with_project_data
 from analist import  analyze_presentation_with_colors, extract_projects_from_presentation
-from . import aggregate_and_summarize
+from . import aggregate_and_summarize, Generate_pptx_from_text
 
 load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
@@ -227,3 +228,57 @@ def delete_all_pptx_files(foldername : str):
             raise Exception(f"Erreur lors de la suppression de {file}: {str(e)}")
 
     return {"message": f"{len(files)} fichiers supprimés avec succès."}
+
+def generate_pptx_from_text(foldername : str, info : str):
+    """Takes the ACRA Info and generates a PPTX from text files, following the template"""
+    
+    # Determine the target folder
+    target_folder = UPLOAD_FOLDER
+    if foldername:
+        target_folder = os.path.join(UPLOAD_FOLDER, foldername)
+    
+    # Ensure the upload directory exists
+    os.makedirs(target_folder, exist_ok=True)
+    
+    # Generate the summary using our updated function with the text information
+    project_data = Generate_pptx_from_text(target_folder, info)
+    print("project_data :", project_data)
+
+    # Ensure project_data is a dictionary, not a list
+    if isinstance(project_data, dict):
+        # Check if we need to extract the 'projects' key
+        if 'projects' in project_data:
+            projects = project_data.get('projects', {})
+            upcoming = project_data.get('upcoming_events', {})
+        else:
+            projects = project_data
+            upcoming = {}
+    else:
+        # If it's not a dictionary, create an empty one
+        print("Warning: project_data is not a dictionary. Creating empty structure.")
+        projects = {}
+        upcoming = {}
+
+    # Set the output filename
+    output_filename = f"{OUTPUT_FOLDER}/updated_presentation_from_text.pptx"
+    if foldername:
+        output_filename = f"{OUTPUT_FOLDER}/{foldername}_text_summary.pptx"
+    
+    # Update the template with the project data using the new format
+    load_dotenv()
+    generated_pptx = update_table_with_project_data(
+        pptx_path=os.getenv("TEMPLATE_FILE", "templates/CRA_TEMPLATE_IA.pptx"),  # Template file 
+        slide_index=0,  # first slide
+        table_shape_index=0,  # index of the table
+        project_data=projects,
+        output_path=output_filename,
+        upcoming_events=upcoming
+    )
+
+    
+    filename = os.path.basename(generated_pptx)
+    
+    shutil.copy(output_filename, os.path.join(target_folder, os.path.basename(output_filename)))
+
+    return {"download_url": f"{output_filename}"}
+
