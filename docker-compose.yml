@@ -26,6 +26,7 @@ services:
       - ./OUTPUT:/app/OUTPUT
       - ./src:/app/src
       - ./OUTPUT:/app/OUTPUT
+      - ./.env:/app/.env
     environment:
       # - API_URL=http://host.docker.internal:5050 # API URL 
       - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt

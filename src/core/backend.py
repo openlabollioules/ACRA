@@ -9,7 +9,7 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
 
-def summarize_ppt(folder_name : str):
+def summarize_ppt(folder_name : str, add_info : str = None):
         """
     Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
     The PowerPoint will be structured with a hierarchical format:
@@ -43,7 +43,7 @@ def summarize_ppt(folder_name : str):
             raise Exception(f"Aucun fichier PowerPoint (.pptx) trouvé dans le dossier {folder_name}.")
         
         # Récupérer les données des projets à partir de get_slide_structure
-        structure_result = aggregate_and_summarize(folder_name)
+        structure_result = aggregate_and_summarize(folder_name, add_info)
         project_data = structure_result.get("projects", {})
         upcoming_events = structure_result.get("upcoming_events", {})
         errors = structure_result.get("metadata", {}).get("errors", [])
@@ -79,9 +79,7 @@ def summarize_ppt(folder_name : str):
 
         # Return the download URL
         filename = os.path.basename(summarized_file_path)
-        download_url = f"http://localhost:5050/download/{filename}"
-        print(f"Summary created successfully. Download URL: {download_url}")
-        return {"download_url": download_url, "filename": filename}
+        return {"filename": filename, "summary": summarized_file_path}
 
 def get_slide_structure(foldername : str):
     folder_path = os.path.join(UPLOAD_FOLDER, foldername)
@@ -275,10 +273,8 @@ def generate_pptx_from_text(foldername : str, info : str):
         upcoming_events=upcoming
     )
 
-    
     filename = os.path.basename(generated_pptx)
-    
-    shutil.copy(output_filename, os.path.join(target_folder, os.path.basename(output_filename)))
+    shutil.copy(output_filename, os.path.join(target_folder, os.path.join(foldername, filename)))
 
-    return {"download_url": f"{output_filename}"}
+    return {"filename": filename, "summary": generated_pptx}
 

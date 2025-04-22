@@ -18,27 +18,33 @@ import logging
 
 # Set up the main application logger
 setup_logging(app_name="ACRA_Pipeline")
-load_dotenv()
 # Use a specific logger for this module
 log = get_logger(__name__)
 
 class Pipeline:
     def __init__(self):
+        load_dotenv()
         log.info("Initializing ACRA Pipeline")
         self.last_response = None
 
-        self.use_api = False
-
+        # Fix: Properly convert USE_API to boolean
+        use_api_env = os.getenv("USE_API", "False")
+        self.use_api = use_api_env.lower() in ("true", "1", "t", "yes", "y")
+        print(f"USE_API: {self.use_api}")
         # self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
         self.streaming_model = OllamaLLM(model="deepseek-r1:14b", base_url="http://host.docker.internal:11434", num_ctx=131000, stream=True)
 
         self.api_url = "http://host.docker.internal:5050"
 
-        self.openwebui_api = "http://host.docker.internal:3030"
+        self.openwebui_api = "http://host.docker.internal:3030/api/v1/"
 
         self.small_model = OllamaLLM(model="qwen2.5:3b", base_url="http://host.docker.internal:11434", num_ctx=131000)
 
         self.file_path_list = []
+        self.openwebui_api_key = os.getenv("OPENWEBUI_API_KEY")
+        if not self.openwebui_api_key:
+            log.error("OPENWEBUI_API_KEY is not set")
+            raise ValueError("OPENWEBUI_API_KEY is not set")
 
         self.chat_id = ""
         self.current_chat_id = ""  # To track conversation changes
@@ -66,8 +72,15 @@ class Pipeline:
         Returns:
             dict: Résultat de la requête avec l'URL de téléchargement
         """
+        log.info(f"Generating report for folder: {foldername}")
+        log.info(f"use_api setting is: {self.use_api}")
+        
+        if self.use_api:
+            log.info("Using API endpoint to generate report")
+            return self.download_file_openwebui(self.fetch(f"generate_report/{foldername}?info={info}")["summary"])
 
-        return generate_pptx_from_text(foldername, info)
+        log.info("Using direct function call to generate report")
+        return self.download_file_openwebui(generate_pptx_from_text(foldername, info)["summary"])
 
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""
@@ -93,6 +106,7 @@ class Pipeline:
     def post(self, endpoint, data=None, files=None, headers=None):
         """Effectue une requête POST synchrone"""
         # Si l'endpoint commence par http, on le considère comme une URL complète
+        print(f"Endpoint: {endpoint}")
         if endpoint.startswith("http"):
             url = endpoint
         else:
@@ -104,22 +118,79 @@ class Pipeline:
             log.error(f"API POST request failed: {response.status_code} - {response.text}")
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
-    def summarize_folder(self, foldername=None):
+    # Method to download a filde using the openwebui api. 
+    def download_file_openwebui(self, file: str):
+        """
+        Télécharge un fichier à partir d'un nom de fichier.
+        """
+        try:
+            headers = {
+                "accept": "application/json",
+                # Remove Content-Type header to let requests set it automatically for multipart/form-data
+                "Authorization": f"Bearer {self.openwebui_api_key}"
+            }
+            url = f"{self.openwebui_api}files/"  # Remove trailing slash
+            log.info(f"Uploading file to OpenWebUI API: {url}")
+            log.info(f"File path: {file}")
+            
+            file_id = ""
+            try:
+                with open(file, "rb") as f:
+                    files = {"file": (os.path.basename(file), f, "application/octet-stream")}
+                    
+                    # Use direct requests instead of self.post for more control
+                    response = requests.post(url, headers=headers, files=files)
+                    log.info(f"Upload response status: {response.status_code}")
+                    
+                    if response.status_code != 200:
+                        log.error(f"File upload failed: {response.status_code} - {response.text}")
+                        return {"error": f"File upload failed: {response.status_code}"}
+                    
+                    # Parse the response
+                    response_data = response.json()
+                    log.info(f"Upload response: {response_data}")
+                    file_id = response_data.get("id", "")
+                    
+                    if not file_id:
+                        log.error("No file ID returned from upload")
+                        return {"error": "No file ID returned from upload"}
+            except Exception as e:
+                log.error(f"Error uploading file: {str(e)}")
+                return {"error": f"Error uploading file: {str(e)}"}
+            
+            download_url = f"http://localhost:3030/api/v1/files/{file_id}/content"
+            log.info(f"Download URL: {download_url}")
+            return {"download_url": download_url}
+        except Exception as e:
+            log.error(f"Error in download_file_openwebui: {str(e)}")
+            return {"error": f"Error in download_file_openwebui: {str(e)}"}
+    
+    def summarize_folder(self, foldername=None, add_info=None):
         """
         Envoie une demande pour résumer tous les fichiers PowerPoint dans un dossier.
         
         Args:
             foldername (str, optional): Le nom du dossier à résumer. Si None, utilise le chat_id.
-        
+            add_info (str, optional): Informations supplémentaires à ajouter au résumé.
         Returns:
             dict: Les résultats de l'opération de résumé.
         """
         if foldername is None:
             foldername = self.chat_id
         
+        log.info(f"Summarizing folder: {foldername}")
+        log.info(f"use_api setting is: {self.use_api}")
+        log.info(f"Additional info: {add_info}")
+        
         if self.use_api:
-            return self.fetch(f"acra/{foldername}")
-        return summarize_ppt(foldername)
+            log.info("Using API endpoint to summarize folder")
+            endpoint = f"acra/{foldername}"
+            if add_info:
+                endpoint += f"?add_info={add_info}"
+            return self.download_file_openwebui(self.fetch(endpoint)["summary"])
+        
+        log.info("Using direct function call to summarize folder")
+        return self.download_file_openwebui(summarize_ppt(foldername, add_info)["summary"])
 
     def extract_service_name(self, filename):
         """
@@ -150,8 +221,14 @@ class Pipeline:
         if foldername is None:
             foldername = self.chat_id
         
+        log.info(f"Analyzing slide structure for folder: {foldername}")
+        log.info(f"use_api setting is: {self.use_api}")
+        
         if self.use_api:
+            log.info("Using API endpoint to get slide structure")
             return self.fetch(f"get_slide_structure/{foldername}")
+        
+        log.info("Using direct function call to get slide structure")
         return get_slide_structure(foldername)
     
     def format_all_slide_data(self, data: dict) -> str:
@@ -428,7 +505,8 @@ class Pipeline:
                 # If we were waiting for summarize confirmation
                 if self.confirmation_command == "summarize":
                     # Generate a new summary
-                    response = self.summarize_folder(additional_info=self.confirmation_additional_info)
+                    log.info(f"Generating summary with additional info: {self.confirmation_additional_info}")
+                    response = self.summarize_folder(add_info=self.confirmation_additional_info)
                     if "error" in response:
                         response = f"Erreur lors de la génération du résumé: {response['error']}"
                     else:
@@ -481,15 +559,15 @@ class Pipeline:
                 return
             else:
                 # No existing summaries, generate one directly
-                response = self.summarize_folder(additional_info=additional_info)
+                response = self.summarize_folder(add_info=additional_info)
                 if "error" in response:
-                    response = f"Erreur lors de la génération du résumé: {response['error']}"
+                    response = {"error": f"Erreur lors de la génération du résumé: {response['error']}"}
                 else:
                     introduction_prompt = f"""Tu es un assistant qui va générer une introduction pour un enssemble de fichiers PPTX je veux juste une description globale des fichiers impliqués dans le message de 
                 l'utilisateur pas de cas par cas et sourtout quelque chose de consit et renvoie uniquement l'introduction (pas d'explication) si tu vois une information importante ou une alerte critique, tu dois 
                 la signaler dans l'introduction. Voici le contenu de tous les fichiers : {self.system_prompt} Tu dois renvoyer uniquement l'introduction (pas d'explication).
                 """
-                introduction = self.small_model.invoke(introduction_prompt)
+                introduction = self.small_model.invoke(introduction_prompt if "introduction_prompt" in locals() else self.system_prompt)
                 response = f"{introduction}\n\n Le résumé de tous les fichiers a été généré avec succès.\n\n  ### URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
                 
                 yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"

@@ -2,22 +2,24 @@ import os,sys
 import shutil
 import uvicorn
 import uuid
+import logging
 from pptx import presentation
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse  
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from core import summarize_ppt, get_slide_structure, get_slide_structure_wcolor, delete_all_pptx_files
+from core import summarize_ppt, get_slide_structure, get_slide_structure_wcolor, delete_all_pptx_files, generate_pptx_from_text
 
 # starting Fast API 
 app = FastAPI() 
 load_dotenv()
+logger = logging.getLogger(__name__)
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
 
 # curl -X POST "http://localhost:5050/acra/" -H "accept: application/json" -H "Content-Type: multipart/form-data" -F "file=@CRA_SERVICE_CYBER.pptx"
-@app.get("/acra/{folder_name}")
-async def summarize(folder_name: str):
+@app.get("/acra/{folder_name}?add_info={add_info}")
+async def summarize(folder_name: str, add_info: str = None):
     """
     Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
     The PowerPoint will be structured with a hierarchical format:
@@ -38,12 +40,31 @@ async def summarize(folder_name: str):
     """
     logger.info(f"Summarizing PPT for folder: {folder_name}")
     try:
-        return summarize_ppt(folder_name)
+        return summarize_ppt(folder_name, add_info)
     except Exception as e:
         # Log the exception for debugging
         print(f"Error in summarize_folder: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Summarize error: {str(e)}")
 
+# curl -X POST "http://localhost:5050/acra/generate_report/CRA_SERVICE_CYBER" -H "accept: application/json" -H "Content-Type: application/json" -d "{\"info\": \"This is a test report\"}"
+@app.post("/acra/generate_report/{folder_name}?info={info}")
+async def generate_report(folder_name: str, info: str):
+    """
+    Génère un rapport à partir du texte fourni en utilisant une requête POST.
+    
+    Args:
+        folder_name (str): Le nom du dossier où stocker le rapport
+        info (str): Le texte à analyser pour générer le rapport
+        
+    Returns:
+        dict: Résultat de la requête avec l'URL de téléchargement
+    """
+    try:
+        return generate_pptx_from_text(folder_name, info)
+    except Exception as e:
+        print(f"Error in generate_report: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Report generation error: {str(e)}")
+    
 # Testing the function with : 
 #  curl -X GET "http://localhost:5050/get_slide_structure/CRA_SERVICE_CYBER.pptx"
 @app.get("/get_slide_structure/{foldername}")

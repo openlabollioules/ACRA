@@ -87,7 +87,7 @@ def extract_common_and_upcoming_info(project_data):
     
     return result
 
-def aggregate_and_summarize(pptx_folder):
+def aggregate_and_summarize(pptx_folder, add_info=None):
     """
     Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
     Uses an LLM to summarize the project information and return it in the specified JSON format.
@@ -389,9 +389,11 @@ def aggregate_and_summarize(pptx_folder):
     
     # Prepare the data to send to the LLM for summarization if needed
     prompt_inputs = {
-        "project_data": json.dumps(result, indent=2, ensure_ascii=False)
+        "project_data": json.dumps(result, indent=2, ensure_ascii=False),
+        "temp_add_info": ""
     }
-    
+    if add_info:
+        prompt_inputs["temp_add_info"] = f"Voici des informations supplémentaires qui peuvent être utiles pour la synthèse: {add_info}"
     # Create a prompt template for the LLM
     summarization_template = PromptTemplate.from_template("""
     Tu es un assistant chargé de résumer des informations de projets et de les formater.
@@ -407,6 +409,8 @@ def aggregate_and_summarize(pptx_folder):
     mais tu peux éliminer les redondances éventuelles.
     
     Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
+    {temp_add_info}
+
     """)
     
     # Generate the prompt
