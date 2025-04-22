@@ -8,12 +8,12 @@ from typing import List, Union, Generator, Iterator, Dict, Any
 from langchain_ollama import  OllamaLLM
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
-from core import summarize_ppt, get_slide_structure, delete_all_pptx_files
+from core import summarize_ppt, get_slide_structure, delete_all_pptx_files, generate_pptx_from_text
 from services import merge_pptx_files
 
 from OLLibrary.utils.text_service import remove_tags_keep
 from OLLibrary.utils.log_service import setup_logging, get_logger
-from services import cleanup_orphaned_folders
+
 import logging
 
 # Set up the main application logger
@@ -66,30 +66,8 @@ class Pipeline:
         Returns:
             dict: Résultat de la requête avec l'URL de téléchargement
         """
-        url = f"{self.api_url}/generate_text_report/{foldername}"
-        data = {"info": info}
-        return self.post(url, data=json.dumps(data), headers={"Content-Type": "application/json"})
 
-        # State tracking
-        self.waiting_for_confirmation = False
-        self.confirmation_command = ""
-        self.confirmation_additional_info = ""
-        log.info("ACRA Pipeline initialized successfully")
-
-    def generate_report(self, foldername, info):
-        """
-        Génère un rapport à partir du texte fourni en utilisant une requête POST.
-        
-        Args:
-            foldername (str): Le nom du dossier où stocker le rapport
-            info (str): Le texte à analyser pour générer le rapport
-            
-        Returns:
-            dict: Résultat de la requête avec l'URL de téléchargement
-        """
-        url = f"{self.api_url}/generate_text_report/{foldername}"
-        data = {"info": info}
-        return self.post(url, data=json.dumps(data), headers={"Content-Type": "application/json"})
+        return generate_pptx_from_text(foldername, info)
 
     def reset_conversation_state(self):
         """Réinitialise les états spécifiques à une conversation"""

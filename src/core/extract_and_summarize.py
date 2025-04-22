@@ -13,7 +13,7 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 
 from langchain_ollama import OllamaLLM
-summarize_model = OllamaLLM(model="deepseek-r1:32b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=64000)
+summarize_model = OllamaLLM(model="deepseek-r1:32b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
 
 from analist import extract_projects_from_presentation
 from OLLibrary.utils.text_service import remove_tags_no_keep
@@ -87,14 +87,13 @@ def extract_common_and_upcoming_info(project_data):
     
     return result
 
-def aggregate_and_summarize(pptx_folder, additional_info=""):
+def aggregate_and_summarize(pptx_folder):
     """
     Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
     Uses an LLM to summarize the project information and return it in the specified JSON format.
     
     Parameters:
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
-      additional_info (str, optional): Additional information or instructions for the summarization process.
     
     Returns:
       dict: A nested dictionary with project/subproject structure containing information and alerts
@@ -437,42 +436,7 @@ def aggregate_and_summarize(pptx_folder, additional_info=""):
         
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
-        # Create a basic structure with the raw data as fallback
-        result = {
-            "activities": {},
-            "upcoming_events": {}
-        }
-        
-        # Process upcoming events
-        upcoming_texts = project_data.get("upcoming_events", "")
-        if upcoming_texts:
-            # Try to identify categories in the text
-            categories = re.findall(r"([A-Za-z0-9/]+):\s*([^:]+?)(?=\n[A-Za-z0-9/]+:|$)", upcoming_texts, re.DOTALL)
-            
-            if categories:
-                for category, text in categories:
-                    result["upcoming_events"][category.strip()] = text.strip()
-            else:
-                result["upcoming_events"]["General"] = upcoming_texts.strip()
-        else:
-            result["upcoming_events"]["General"] = "Aucun événement particulier prévu."
-        
-        # Process projects without LLM summarization
-        for project_name, project_info in project_data.items():
-            if project_name == "upcoming_events":
-                continue
-                
-            summary = project_info.get("information", "").strip()
-            
-            result["activities"][project_name] = {
-                "summary": summary if summary else "Aucune information disponible.",
-                "alerts": {
-                    "advancements": project_info.get("alerts", {}).get("advancements", []),
-                    "small_alerts": project_info.get("alerts", {}).get("small_alerts", []),
-                    "critical_alerts": project_info.get("alerts", {}).get("critical_alerts", [])
-                }
-            }
-        
+        # If summarization fails, return the raw aggregated data
         return result
 
 def Generate_pptx_from_text(pptx_folder, info=None):
@@ -490,10 +454,13 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     # If no info is provided, return empty structure
     if not info:
         return {
-            "activities": {},
-            "upcoming_events": {
-                "General": "Aucun événement particulier prévu."
-            }
+            "projects": {},
+            "upcoming_events": {},
+            "metadata": {
+                "processed_files": 0,
+                "folder": os.path.basename(pptx_folder)
+            },
+            "source_files": []
         }
     
     # Create a prompt template for the LLM
@@ -510,27 +477,64 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     4. Les alertes mineures (points à surveiller)
     5. Les alertes critiques (problèmes urgents)
     6. Les événements à venir pour chaque projet ou catégorie
-
+    7. Lorsque dans le summary il y a des alerts (advancements, small_alerts, critical_alerts) met entre des balises <advancements> et </advancements>, <small_alerts> et </small_alerts>, <critical_alerts> et </critical_alerts>.
+    
     Organise les informations selon le format JSON suivant:
     ```json
     {{
-      "activities": {{
-        "Nom du Projet": {{
-          "summary": "Résumé concis des informations principales du projet en une ou deux phrases",
-          "alerts": {{
-            "advancements": ["Liste des avancements significatifs, sous forme de points concis"],
-            "small_alerts": ["Liste des alertes mineures, sous forme de points concis"],
-            "critical_alerts": ["Liste des alertes critiques, sous forme de points concis"]
-          }}
+    "projects":{{
+        "project1":{{
+            "information":"",
+            "critical":[],
+            "small":[],
+            "advancements":[]
         }},
-        // Autres projets...
-      }},
-      "upcoming_events": {{
-        "Catégorie1": "Description des événements à venir pour cette catégorie",
-        "Catégorie2": "Description des événements à venir pour cette catégorie",
-        // Autres catégories...
-      }}
-    }}
+        "project2":{{
+            "subproject1":{{
+                "information":"",
+                "critical":[],
+                "small":[],
+                "advancements":[]
+            }},
+            "subproject2":{{
+                "subsubproject1":{{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                }},
+                "subsubproject2":{{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                }}
+            }}
+        }}
+    }},
+    "upcoming_events":{{
+        "service1":[],
+        "service2":[]
+    }},
+    "metadata":{{
+        "processed_files": "number (int) of processed files",
+        "fodler":"Name of the folder"
+    }},
+    "source_files":[
+        {{
+            "filename":"",
+            "service_name":"",
+            "processed":"True/False",
+            "events_counts":"number of upcoming_events found in it"
+        }},
+        {{
+            "filename":"",
+            "service_name":"",
+            "processed":"True/False",
+            "events_counts":"number of upcoming_events found in it"
+        }}
+    ]
+}}
     ```
 
     Assure-toi de:
@@ -569,12 +573,8 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         # Clean the JSON string and parse it
         json_str = json_str.strip()
         result = json.loads(json_str)
-        
-        # Ensure the expected structure exists
-        if "activities" not in result:
-            result["activities"] = {}
-        if "upcoming_events" not in result:
-            result["upcoming_events"] = {"General": "Aucun événement particulier prévu."}
+        print("result :", result)
+        print("result type :", type(result))
         
         return result
         
@@ -582,21 +582,60 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         print(f"Error during LLM summarization: {str(e)}")
         # Create a basic structure as fallback
         result = {
-            "activities": {
-                "Général": {
-                    "summary": "Information extraite du texte fourni.",
-                    "alerts": {
-                        "advancements": [],
-                        "small_alerts": [],
-                        "critical_alerts": []
+            "projects":{
+                "project1":{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                },
+                "project2":{
+                    "subproject1":{
+                        "information":"",
+                        "critical":[],
+                        "small":[],
+                        "advancements":[]
+                    },
+                    "subproject2":{
+                        "subsubproject1":{
+                            "information":"",
+                            "critical":[],
+                            "small":[],
+                            "advancements":[]
+                        },
+                        "subsubproject2":{
+                            "information":"",
+                            "critical":[],
+                            "small":[],
+                            "advancements":[]
+                        }
                     }
                 }
             },
-            "upcoming_events": {
-                "General": "Aucun événement particulier prévu."
-            }
+            "upcoming_events":{
+                "service1":[],
+                "service2":[]
+            },
+            "metadata":{
+                "processed_files": "number (int) of processed files",
+                "fodler":"Name of the folder"
+            },
+            "source_files":[
+                {
+                    "filename":"",
+                    "service_name":"",
+                    "processed":"True/False",
+                    "events_counts":"number of upcoming_events found in it"
+                },
+                {
+                    "filename":"",
+                    "service_name":"",
+                    "processed":"True/False",
+                    "events_counts":"number of upcoming_events found in it"
+                }
+            ]
         }
-        
+                
         return result
 
 if __name__ == "__main__":

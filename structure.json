@@ -1,0 +1,54 @@
+{
+    "projects":{
+        "project1":{
+            "information":"",
+            "critical":[],
+            "small":[],
+            "advancements":[]
+        },
+        "project2":{
+            "subproject1":{
+                "information":"",
+                "critical":[],
+                "small":[],
+                "advancements":[]
+            },
+            "subproject2":{
+                "subsubproject1":{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                },
+                "subsubproject2":{
+                    "information":"",
+                    "critical":[],
+                    "small":[],
+                    "advancements":[]
+                }
+            }
+        }
+    },
+    "upcoming_events":{
+        "service1":[],
+        "service2":[]
+    },
+    "metadata":{
+        "processed_files": "number (int) of processed files",
+        "fodler":"Name of the folder"
+    },
+    "source_files":[
+        {
+            "filename":"",
+            "service_name":"",
+            "processed":"True/False",
+            "events_counts":"number of upcoming_events found in it"
+        },
+        {
+            "filename":"",
+            "service_name":"",
+            "processed":"True/False",
+            "events_counts":"number of upcoming_events found in it"
+        }
+    ]
+}
