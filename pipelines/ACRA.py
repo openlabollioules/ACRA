@@ -9,7 +9,7 @@ from langchain_ollama import  OllamaLLM
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
 from core import summarize_ppt, get_slide_structure, delete_all_pptx_files, generate_pptx_from_text
-from services import merge_pptx_files
+from services import merge_pptx
 
 from OLLibrary.utils.text_service import remove_tags_keep
 from OLLibrary.utils.log_service import setup_logging, get_logger
@@ -563,8 +563,9 @@ class Pipeline:
             return
 
         elif "/merge" in message:
-            folderpath = os.path.join("./pptx_folder", self.chat_id)
-            response = merge_pptx_files(folderpath, os.path.join("./OUTPUT", self.chat_id, "merged_presentation.pptx"))
+            output_merge = "./OUTPUT/"+self.chat_id + "/merged/" 
+            input_merge = "./pptx_folder/" + self.chat_id
+            response = str(merge_pptx(input_merge,output_merge))
             if "error" in response:
                 response = f"Erreur lors de la fusion des fichiers: {response['error']}"
             else:

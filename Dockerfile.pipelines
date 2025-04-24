@@ -1,0 +1,13 @@
+# Dockerfile.pipelines
+FROM ghcr.io/open-webui/pipelines:main
+
+USER root
+RUN apt-get update && \
+    apt-get install -y nodejs npm && \
+    rm -rf /var/lib/apt/lists/*
+
+# S'il s'agit d'une image Alpine, remplace par :
+# RUN apk add --no-cache nodejs npm
+
+# (Optionnel) repasser en utilisateur non-root si nécessaire
+# USER pipelines

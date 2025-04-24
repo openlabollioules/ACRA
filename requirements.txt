@@ -9,3 +9,4 @@ requests>=2.26.0
 langchain-ollama>=0.0.1
 pydantic>=1.8.2
 six
+aspose-slides
