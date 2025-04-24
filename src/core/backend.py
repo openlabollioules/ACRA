@@ -1,9 +1,11 @@
 import os
 import shutil
 from dotenv import load_dotenv
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from services import update_table_with_project_data
 from analist import  analyze_presentation_with_colors, extract_projects_from_presentation
-from . import aggregate_and_summarize, Generate_pptx_from_text
+from .extract_and_summarize import aggregate_and_summarize, Generate_pptx_from_text
 
 load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
