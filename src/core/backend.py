@@ -9,7 +9,7 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
 
-def summarize_ppt(folder_name : str, add_info : str = None):
+def summarize_ppt(folder_name : str, add_info : str = None, timestamp : str = None):
         """
     Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
     The PowerPoint will be structured with a hierarchical format:
@@ -20,6 +20,8 @@ def summarize_ppt(folder_name : str, add_info : str = None):
 
     Args:
         folder_name (str): The name of the folder containing PowerPoint files to analyze.
+        add_info (str, optional): Additional information to include in the summary.
+        timestamp (str, optional): Timestamp to use in the filename for uniqueness. If None, will use the current time.
 
     Returns:
         dict: A dictionary containing the download URL of the updated PowerPoint file.
@@ -60,10 +62,17 @@ def summarize_ppt(folder_name : str, add_info : str = None):
             print(f"ERROR: {error_message}")
             raise Exception(error_message)
         
-        # Set the output filename
-        output_filename = f"{OUTPUT_FOLDER}/updated_presentation.pptx"
-        if folder_name:
-            output_filename = f"{OUTPUT_FOLDER}/{folder_name}_summary.pptx"
+        # Create output directory for this folder
+        folder_output_path = os.path.join(OUTPUT_FOLDER, folder_name)
+        os.makedirs(folder_output_path, exist_ok=True)
+        
+        # Generate timestamp if not provided
+        if timestamp is None:
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Set the output filename directly in the subfolder, including timestamp
+        output_filename = os.path.join(folder_output_path, f"{folder_name}_summary_{timestamp}.pptx")
         
         print(f"Creating summary PowerPoint at: {output_filename}")
         
@@ -227,8 +236,18 @@ def delete_all_pptx_files(foldername : str):
 
     return {"message": f"{len(files)} fichiers supprimés avec succès."}
 
-def generate_pptx_from_text(foldername : str, info : str):
-    """Takes the ACRA Info and generates a PPTX from text files, following the template"""
+def generate_pptx_from_text(foldername : str, info : str, timestamp : str = None):
+    """
+    Takes the ACRA Info and generates a PPTX from text files, following the template
+    
+    Args:
+        foldername (str): Name of the folder to store the PowerPoint
+        info (str): Text to analyze for the PowerPoint generation
+        timestamp (str, optional): Timestamp to use in the filename for uniqueness. If None, will use the current time.
+    
+    Returns:
+        dict: A dictionary containing filename and path to the generated PowerPoint
+    """
     
     # Determine the target folder
     target_folder = UPLOAD_FOLDER
@@ -256,11 +275,16 @@ def generate_pptx_from_text(foldername : str, info : str):
         print("Warning: project_data is not a dictionary. Creating empty structure.")
         projects = {}
         upcoming = {}
-
-    # Set the output filename
-    output_filename = f"{OUTPUT_FOLDER}/updated_presentation_from_text.pptx"
-    if foldername:
-        output_filename = f"{OUTPUT_FOLDER}/{foldername}_text_summary.pptx"
+    
+    # Generate timestamp if not provided
+    if timestamp is None:
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save the file in pptx_folder/chat_id instead of OUTPUT/chat_id
+    generated_filename = f"{foldername}_text_summary_{timestamp}.pptx"
+    output_filename = os.path.join(target_folder, generated_filename)
+    print(f"Creating text-generated PowerPoint at: {output_filename}")
     
     # Update the template with the project data using the new format
     load_dotenv()
@@ -274,7 +298,5 @@ def generate_pptx_from_text(foldername : str, info : str):
     )
 
     filename = os.path.basename(generated_pptx)
-    shutil.copy(output_filename, os.path.join(target_folder, os.path.join(foldername, filename)))
-
     return {"filename": filename, "summary": generated_pptx}
 

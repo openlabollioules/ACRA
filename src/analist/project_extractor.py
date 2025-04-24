@@ -137,7 +137,7 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                         
                     cell_text = cell.text.strip() if hasattr(cell, 'text') else ""
                     print(f"Row {row_idx}, Column {col_idx}: Text length {len(cell_text)}")
-                    
+                        
                     # Vérifier si la cellule a du contenu
                     if hasattr(cell, 'text_frame'):
                         cell_data = {
