@@ -26,10 +26,12 @@ services:
         - ./pptx_folder:/app/pptx_folder
         - ./templates:/app/templates
         - ./OUTPUT:/app/OUTPUT
+        - ./mappings:/app/mappings
         - ./src:/app/src
         - ./.env:/app/.env
       environment:
         - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt
+        - MAPPINGS_FOLDER=/app/mappings
       networks:
         - webui-net
         

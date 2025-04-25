@@ -93,6 +93,10 @@ def summarize_ppt(folder_name : str, add_info : str = None, timestamp : str = No
         return {"filename": filename, "summary": summarized_file_path}
 
 def get_slide_structure(foldername : str):
+    # Check if foldername is None
+    if foldername is None:
+        raise Exception("Le nom du dossier (foldername) ne peut pas être None.")
+        
     folder_path = os.path.join(UPLOAD_FOLDER, foldername)
     if not os.path.exists(folder_path):
         raise Exception("Le dossier n'existe pas.")

@@ -149,6 +149,26 @@ def delete_matching_files_in_openwebui(folder_id: str):
     pptx_folder_path = os.path.join(UPLOAD_FOLDER, folder_id)
     openwebui_uploads_path = OPENWEBUI_UPLOADS
     
+    # Essayer de trouver le dossier uploads si le chemin par défaut ne fonctionne pas
+    if not os.path.exists(openwebui_uploads_path):
+        logger.warning(f"Dossier uploads non trouvé à l'emplacement {openwebui_uploads_path}")
+        
+        # Essayer avec un chemin absolu
+        abs_path = os.path.abspath(openwebui_uploads_path)
+        logger.info(f"Tentative avec le chemin absolu: {abs_path}")
+        if os.path.exists(abs_path):
+            openwebui_uploads_path = abs_path
+            logger.info(f"Dossier uploads trouvé à: {openwebui_uploads_path}")
+        else:
+            # Essayer avec ./open-webui/uploads
+            alternate_path = os.path.abspath("./open-webui/uploads")
+            logger.info(f"Tentative avec le chemin alternatif: {alternate_path}")
+            if os.path.exists(alternate_path):
+                openwebui_uploads_path = alternate_path
+                logger.info(f"Dossier uploads trouvé à: {openwebui_uploads_path}")
+            else:
+                logger.error("Impossible de trouver le dossier uploads")
+    
     logger.info(f"Checking for matching files between {pptx_folder_path} and {openwebui_uploads_path}")
     
     if not os.path.exists(pptx_folder_path) or not os.path.exists(openwebui_uploads_path):
@@ -157,15 +177,19 @@ def delete_matching_files_in_openwebui(folder_id: str):
     
     # Get list of files in pptx_folder/id
     pptx_files = list_files_in_folder(pptx_folder_path)
+    logger.info(f"Fichiers trouvés dans {pptx_folder_path}: {pptx_files}")
     
     # Get list of files in open-webui/uploads
     openwebui_files = list_files_in_folder(openwebui_uploads_path)
+    logger.info(f"Fichiers trouvés dans {openwebui_uploads_path}: {openwebui_files}")
     
     # Delete matching files
     for pptx_file in pptx_files:
         for openwebui_file in openwebui_files:
-            if pptx_file == openwebui_file:  # Check if filenames match exactly
+            # Au lieu de rechercher une correspondance exacte, vérifier si le nom est inclus
+            if pptx_file in openwebui_file or openwebui_file in pptx_file:  # Check if either filename is contained in the other
                 file_path = os.path.join(openwebui_uploads_path, openwebui_file)
+                logger.info(f"Correspondance trouvée: {pptx_file} est lié à {openwebui_file}")
                 try:
                     os.remove(file_path)
                     deleted_files.append(file_path)
@@ -173,6 +197,7 @@ def delete_matching_files_in_openwebui(folder_id: str):
                 except Exception as e:
                     logger.error(f"Error deleting file {file_path}: {str(e)}")
     
+    logger.info(f"Suppression terminée: {len(deleted_files)} fichiers supprimés")
     return deleted_files
 
 def delete_folder_and_contents(folder_path: str):
