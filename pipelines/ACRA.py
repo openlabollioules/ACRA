@@ -38,7 +38,7 @@ class Pipeline:
         self.use_api = use_api_env.lower() in ("true", "1", "t", "yes", "y")
         print(f"USE_API: {self.use_api}")
         # self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
-        self.streaming_model = OllamaLLM(model="deepseek-r1:14b", base_url="http://host.docker.internal:11434", num_ctx=131000, stream=True)
+        self.streaming_model = OllamaLLM(model="qwen3:30b-a3b", base_url="http://host.docker.internal:11434", num_ctx=131000, stream=True)
 
         self.api_url = "http://host.docker.internal:5050"
 
@@ -1428,15 +1428,30 @@ class Pipeline:
         elif "/merge" in message:
             output_merge = "./OUTPUT/"+self.chat_id + "/merged/" 
             input_merge = "./pptx_folder/" + self.chat_id
-            response = str(merge_pptx(input_merge,output_merge))
-            if "error" in response:
-                response = f"Erreur lors de la fusion des fichiers: {response['error']}"
+            merge_result = merge_pptx(input_merge, output_merge)
+            
+            if "error" in merge_result:
+                response = f"Erreur lors de la fusion des fichiers: {merge_result['error']}"
             else:
-                response = "Les fichiers ont été fusionnés avec succès." + response
-                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = response
-                return
+                # Get the merged file path from the result
+                merged_file = merge_result.get("merged_file")
+                if merged_file:
+                    # Upload the merged file to OpenWebUI and get download URL
+                    upload_result = self.download_file_openwebui(merged_file)
+                    if "error" in upload_result:
+                        response = f"Les fichiers ont été fusionnés avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
+                    else:
+                        response = f"Les fichiers ont été fusionnés avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
+                else:
+                    response = "Les fichiers ont été fusionnés avec succès, mais le chemin du fichier fusionné n'a pas été trouvé."
+                
+                # Save mappings after uploading the merged file
+                self.save_file_mappings()
+            
+            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.last_response = response
+            return
         # Ajouter la dernière réponse au contexte si elle existe
         if user_message:
             user_message += f"\n\n *Last response generated :* {self.last_response}"
