@@ -15,6 +15,7 @@ from services import merge_pptx, delete_matching_files_in_openwebui
 
 from OLLibrary.utils.text_service import remove_tags_keep
 from OLLibrary.utils.log_service import setup_logging, get_logger
+from OLLibrary.utils.json_service import extract_json
 
 import logging
 
@@ -1452,6 +1453,74 @@ class Pipeline:
             yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
             self.last_response = response
             return
+
+        elif "/regroup" in message:
+            # First, get the structure of all files
+            structure_result = self.analyze_slide_structure(self.chat_id)
+            if "error" in structure_result:
+                response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
+            else:
+                # Use the small model to regroup project information
+                regroup_prompt = f"""Tu es un assistant spécialisé dans la réorganisation de données de projets. Tu dois analyser la structure suivante et regrouper les informations des projets similaires ou liés. 
+                Pour chaque projet, tu dois:
+                1. Identifier les projets similaires ou liés
+                2. Fusionner leurs informations, alertes critiques, alertes à surveiller et avancements
+                3. Maintenir la hiérarchie des projets (projets principaux, sous-projets, etc.)
+                4. Conserver tous les événements à venir par service
+                5. Surtout ne pas modifier les informations des projets, juste les regrouper et les hiérarchiser.
+                
+                IMPORTANT: Tu dois renvoyer UNIQUEMENT un objet JSON valide, sans aucun texte avant ou après. Le JSON doit suivre exactement la même structure que l'input, avec les mêmes clés et types de données.
+                
+                Voici la structure actuelle:
+                {json.dumps(structure_result, indent=2, ensure_ascii=False)}
+                
+                Renvoie uniquement le JSON réorganisé, sans aucun autre texte."""
+                
+                try:
+                    regrouped_structure = self.small_model.invoke(regroup_prompt)
+                    
+                    # Log the raw response for debugging
+                    log.info(f"Raw model response: {regrouped_structure}")
+                    
+                    # Use extract_json to handle any formatting issues
+                    try:
+                        regrouped_data = extract_json(regrouped_structure)
+                        if not regrouped_data:
+                            raise ValueError("No valid JSON could be extracted from the model's response")
+                    except Exception as e:
+                        log.error(f"JSON extraction error: {str(e)}")
+                        log.error(f"Invalid content: {regrouped_structure}")
+                        response = f"Erreur lors de la réorganisation des données: impossible d'extraire un JSON valide. Détails: {str(e)}"
+                        yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                        yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                        self.last_response = response
+                        return
+                    
+                    # Create a new PowerPoint with the regrouped information
+                    output_regroup = "./OUTPUT/"+self.chat_id + "/regrouped/"
+                    os.makedirs(output_regroup, exist_ok=True)
+                    
+                    # Convert the regrouped structure to a text format for the PowerPoint
+                    text_content = self.format_all_slide_data(regrouped_data)
+                    
+                    # Generate the PowerPoint
+                    report_result = self.generate_report(self.chat_id, text_content)
+                    
+                    if "error" in report_result:
+                        response = f"Erreur lors de la génération du rapport regroupé: {report_result['error']}"
+                    else:
+                        response = f"Les informations des projets ont été regroupées avec succès.\n\n### URL de téléchargement:\n{report_result.get('download_url', 'Non disponible')}"
+                        # Save mappings after uploading the new file
+                        self.save_file_mappings()
+                except Exception as e:
+                    log.error(f"Error during regrouping: {str(e)}")
+                    log.exception("Full error details:")
+                    response = f"Erreur lors de la réorganisation des données: {str(e)}"
+            
+            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.last_response = response
+            return
         # Ajouter la dernière réponse au contexte si elle existe
         if user_message:
             user_message += f"\n\n *Last response generated :* {self.last_response}"
@@ -1464,6 +1533,7 @@ class Pipeline:
 /clear [IDs] --> Nettoie tous les dossiers orphelins et supprime les fichiers associés dans OpenWebUI (préserve la conversation actuelle et éventuellement d'autres IDs spécifiés)
 /generate --> Génère tout le pptx en fonction du texte ( /generate [Avancements de la semaine])
 /merge --> Fusionne tous les fichiers pptx envoyés
+/regroup --> Regroupe les informations des projets similaires ou liés
             """
             self.last_response = commands
             yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"
