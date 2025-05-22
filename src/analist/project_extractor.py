@@ -248,20 +248,43 @@ def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict
         }
         
         # Process project information from column 1
+        project_information = ""
+        
         for paragraph in project_info_cell.get("paragraphs", []):
-            raw_projects[full_project_name]["information"] += paragraph.get("text", "") + "\n"
+            # Track the original paragraph text
+            paragraph_text = paragraph.get("text", "")
+            
+            # Keep a copy of paragraph text for information field
+            # We'll remove any text identified as alerts or advancements
+            paragraph_information = paragraph_text
             
             # Process runs to extract colored alerts
             for run in paragraph.get("runs", []):
+                run_text = run["text"]
+                
+                # Add text to appropriate category based on color
                 if run["color_type"] == "advancement":
-                    raw_projects[full_project_name]["advancements"].append(run["text"])
+                    if run_text not in raw_projects[full_project_name]["advancements"]:
+                        raw_projects[full_project_name]["advancements"].append(run_text)
+                    # Remove from information text
+                    paragraph_information = paragraph_information.replace(run_text, "")
                 elif run["color_type"] == "small_alert":
-                    raw_projects[full_project_name]["small"].append(run["text"])
+                    if run_text not in raw_projects[full_project_name]["small"]:
+                        raw_projects[full_project_name]["small"].append(run_text)
+                    # Remove from information text
+                    paragraph_information = paragraph_information.replace(run_text, "")
                 elif run["color_type"] == "critical_alert":
-                    raw_projects[full_project_name]["critical"].append(run["text"])
+                    if run_text not in raw_projects[full_project_name]["critical"]:
+                        raw_projects[full_project_name]["critical"].append(run_text)
+                    # Remove from information text
+                    paragraph_information = paragraph_information.replace(run_text, "")
+            
+            # Add remaining text (after removing alerts) to information
+            if paragraph_information.strip():
+                project_information += paragraph_information + "\n"
         
-        # Clean up information text
-        raw_projects[full_project_name]["information"] = raw_projects[full_project_name]["information"].strip()
+        # Set the cleaned information text
+        raw_projects[full_project_name]["information"] = project_information.strip()
         
         # Process upcoming events from column 2 - collect them pour les remonter au niveau supérieur
         events_text = events_cell.get("text", "").strip()

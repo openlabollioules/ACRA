@@ -193,36 +193,39 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
             # Track if we need to add a paragraph for subsequent content
             has_content = True
             
-            # Add top-level project alerts and advancements
-            # Add advancements (green)
-            if "advancements" in project_content and project_content["advancements"]:
+            # Add top-level project alerts and advancements as colored text rather than duplicating
+            # We'll add these in a new paragraph to separate them from general information
+            if (project_content.get("advancements") or 
+                project_content.get("small") or 
+                project_content.get("critical")):
+                
+                # Create a new paragraph for the alerts
                 p = tf.add_paragraph()
-                p.alignment = PP_ALIGN.LEFT  # Left-align text
-                run = p.add_run()
-                run.font.size = Pt(8)
-                run.text = "\n".join(project_content["advancements"])
-                run.font.color.rgb = RGBColor(0, 128, 0)  # Green
-                has_content = True
-            
-            # Add small alerts (orange)
-            if "small" in project_content and project_content["small"]:
-                p = tf.add_paragraph()
-                p.alignment = PP_ALIGN.LEFT  # Left-align text
-                run = p.add_run()
-                run.font.size = Pt(8)
-                run.text = "\n".join(project_content["small"])
-                run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
-                has_content = True
-            
-            # Add critical alerts (red)
-            if "critical" in project_content and project_content["critical"]:
-                p = tf.add_paragraph()
-                p.alignment = PP_ALIGN.LEFT  # Left-align text
-                run = p.add_run()
-                run.font.size = Pt(8)
-                run.text = "\n".join(project_content["critical"])
-                run.font.color.rgb = RGBColor(255, 0, 0)  # Red
-                has_content = True
+                p.alignment = PP_ALIGN.LEFT
+                
+                # Add advancements (green)
+                if project_content.get("advancements"):
+                    for advancement in project_content["advancements"]:
+                        run = p.add_run()
+                        run.font.size = Pt(8)
+                        run.text = advancement + "\n"
+                        run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                
+                # Add small alerts (orange)
+                if project_content.get("small"):
+                    for alert in project_content["small"]:
+                        run = p.add_run()
+                        run.font.size = Pt(8)
+                        run.text = alert + "\n"
+                        run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
+                
+                # Add critical alerts (red)
+                if project_content.get("critical"):
+                    for alert in project_content["critical"]:
+                        run = p.add_run()
+                        run.font.size = Pt(8)
+                        run.text = alert + "\n"
+                        run.font.color.rgb = RGBColor(255, 0, 0)  # Red
         else:
             has_content = False
         
@@ -255,33 +258,53 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
                 run.font.size = Pt(8)
                 run.text = subproject_content["information"]
                 
-                # Add subproject alerts and advancements
-                # Add advancements (green)
-                if "advancements" in subproject_content and subproject_content["advancements"]:
-                    run = p.add_run()
-                    run.font.size = Pt(8)
-                    run.text = "\n".join(subproject_content["advancements"])
-                    run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                # Add subproject alerts and advancements inline with proper colors
+                has_alerts = False
                 
-                # Add small alerts (orange)
-                if "small" in subproject_content and subproject_content["small"]:
+                # Add any alerts in a new paragraph
+                if (subproject_content.get("advancements") or 
+                    subproject_content.get("small") or 
+                    subproject_content.get("critical")):
+                    
+                    has_alerts = True
+                    
+                    # Create a new run for a line break
                     run = p.add_run()
-                    run.font.size = Pt(8)
-                    run.text = "\n".join(subproject_content["small"])
-                    run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
-                
-                # Add critical alerts (red)
-                if "critical" in subproject_content and subproject_content["critical"]:
-                    run = p.add_run()
-                    run.font.size = Pt(8)
-                    run.text = "\n".join(subproject_content["critical"])
-                    run.font.color.rgb = RGBColor(255, 0, 0)  # Red
+                    run.text = "\n"
+                    
+                    # Add advancements (green)
+                    if subproject_content.get("advancements"):
+                        for advancement in subproject_content["advancements"]:
+                            run = p.add_run()
+                            run.font.size = Pt(8)
+                            run.text = advancement + "\n"
+                            run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                    
+                    # Add small alerts (orange)
+                    if subproject_content.get("small"):
+                        for alert in subproject_content["small"]:
+                            run = p.add_run()
+                            run.font.size = Pt(8)
+                            run.text = alert + "\n"
+                            run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
+                    
+                    # Add critical alerts (red)
+                    if subproject_content.get("critical"):
+                        for alert in subproject_content["critical"]:
+                            run = p.add_run()
+                            run.font.size = Pt(8)
+                            run.text = alert + "\n"
+                            run.font.color.rgb = RGBColor(255, 0, 0)  # Red
             
             # Process subsubprojects
             for subsubproject_name, subsubproject_content in subproject_content.items():
                 # Skip non-dictionary fields (already processed)
                 if not isinstance(subsubproject_content, dict) or subsubproject_name in ["information", "critical", "small", "advancements"]:
                     continue
+                
+                # Start a new paragraph for the subsubproject
+                p = tf.add_paragraph()
+                p.alignment = PP_ALIGN.LEFT
                 
                 run = p.add_run()
                 run.font.size = Pt(8)
@@ -294,27 +317,43 @@ def update_table_with_project_data(pptx_path, slide_index, table_shape_index, pr
                     run.font.size = Pt(8)
                     run.text = subsubproject_content["information"]
                     
-                    # Add subsubproject alerts and advancements
-                    # Add advancements (green)
-                    if "advancements" in subsubproject_content and subsubproject_content["advancements"]:
-                        run = p.add_run()
-                        run.font.size = Pt(8)
-                        run.text = "\n".join(subsubproject_content["advancements"])
-                        run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                    # Add subsubproject alerts and advancements inline with proper colors
+                    has_alerts = False
                     
-                    # Add small alerts (orange)
-                    if "small" in subsubproject_content and subsubproject_content["small"]:
+                    # Add any alerts in a new paragraph
+                    if (subsubproject_content.get("advancements") or 
+                        subsubproject_content.get("small") or 
+                        subsubproject_content.get("critical")):
+                        
+                        has_alerts = True
+                        
+                        # Create a new run for a line break
                         run = p.add_run()
-                        run.font.size = Pt(8)
-                        run.text = "\n".join(subsubproject_content["small"])
-                        run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
-                    
-                    # Add critical alerts (red)
-                    if "critical" in subsubproject_content and subsubproject_content["critical"]:
-                        run = p.add_run()
-                        run.font.size = Pt(8)
-                        run.text = "\n".join(subsubproject_content["critical"])
-                        run.font.color.rgb = RGBColor(255, 0, 0)  # Red
+                        run.text = "\n"
+                        
+                        # Add advancements (green)
+                        if subsubproject_content.get("advancements"):
+                            for advancement in subsubproject_content["advancements"]:
+                                run = p.add_run()
+                                run.font.size = Pt(8)
+                                run.text = advancement + "\n"
+                                run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+                        
+                        # Add small alerts (orange)
+                        if subsubproject_content.get("small"):
+                            for alert in subsubproject_content["small"]:
+                                run = p.add_run()
+                                run.font.size = Pt(8)
+                                run.text = alert + "\n"
+                                run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
+                        
+                        # Add critical alerts (red)
+                        if subsubproject_content.get("critical"):
+                            for alert in subsubproject_content["critical"]:
+                                run = p.add_run()
+                                run.font.size = Pt(8)
+                                run.text = alert + "\n"
+                                run.font.color.rgb = RGBColor(255, 0, 0)  # Red
         
         # Move to the next row
         table.rows[current_row].height = Pt(8)

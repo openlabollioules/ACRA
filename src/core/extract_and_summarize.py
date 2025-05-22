@@ -405,6 +405,8 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     Pour chaque entrée, tu peux conserver la structure mais synthétise les informations
     pour qu'elles soient plus concises tout en préservant les détails importants.
     
+    TRÈS IMPORTANT: Pour éviter la duplication d'informations, quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, place-la UNIQUEMENT dans la catégorie correspondante (critical, small, advancements) et PAS dans le champ "information". Le champ "information" doit contenir UNIQUEMENT les informations neutres qui ne sont pas des alertes ou des avancements.
+    
     Les alertes critiques, alertes mineures et avancements doivent être conservés tels quels,
     mais tu peux éliminer les redondances éventuelles. Soit vraiment le plus concis possible mais il faut également
     pouvoir retransmettre le maximum d'informations. N'hésites pas à synthétiser en quelques mots (essaie de te contenir à 10 mots environs)
@@ -483,7 +485,8 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     4. Les alertes mineures (points à surveiller)
     5. Les alertes critiques (problèmes urgents)
     6. Les événements à venir pour chaque projet ou catégorie
-    7. Lorsque dans le summary il y a des alerts (advancements, small_alerts, critical_alerts) met entre des balises <advancements> et </advancements>, <small_alerts> et </small_alerts>, <critical_alerts> et </critical_alerts>.
+
+    TRÈS IMPORTANT: Pour éviter la duplication d'informations, quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, place-la UNIQUEMENT dans la catégorie correspondante (critical, small, advancements) et PAS dans le champ "information". Le champ "information" doit contenir UNIQUEMENT les informations neutres qui ne sont pas des alertes ou des avancements.
     
     Organise les informations selon le format JSON suivant:
     ```json
@@ -523,21 +526,15 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         "service2":[]
     }},
     "metadata":{{
-        "processed_files": "number (int) of processed files",
-        "fodler":"Name of the folder"
+        "processed_files": 1,
+        "folder":"Name of the folder"
     }},
     "source_files":[
         {{
-            "filename":"",
-            "service_name":"",
-            "processed":"True/False",
-            "events_counts":"number of upcoming_events found in it"
-        }},
-        {{
-            "filename":"",
-            "service_name":"",
-            "processed":"True/False",
-            "events_counts":"number of upcoming_events found in it"
+            "filename":"generated_from_text",
+            "service_name":"Text Generator",
+            "processed":true,
+            "events_count":0
         }}
     ]
 }}
@@ -547,13 +544,13 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     1. Identifier correctement les différents projets mentionnés dans le texte
     2. Créer un résumé concis et informatif pour chaque projet mais ne perdez pas de points importants
     3. Catégoriser correctement les informations en advancements, small_alerts, et critical_alerts
-    4. Organiser les événements à venir par catégories pertinentes
-    5. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
-    6. Assurer que tout soit en Français
-    7. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte.
-    8. Lorsque tu catégorises les informations elle ne doivent pas être classée dans une autre catégorie par exemple une alerte mineure ne doit pas être classée dans une alerte critique et dans une alerte mineure.
-    9. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles.
-    10. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON.
+    4. Une information NE DOIT JAMAIS apparaître à la fois dans "information" et dans une catégorie d'alerte
+    5. Organiser les événements à venir par catégories pertinentes
+    6. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
+    7. Assurer que tout soit en Français
+    8. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte
+    9. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles
+    10. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON
     
     """)
     
@@ -589,55 +586,24 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         # Create a basic structure as fallback
         result = {
             "projects":{
-                "project1":{
-                    "information":"",
+                "Général":{
+                    "information":"Informations extraites du texte fourni",
                     "critical":[],
                     "small":[],
                     "advancements":[]
-                },
-                "project2":{
-                    "subproject1":{
-                        "information":"",
-                        "critical":[],
-                        "small":[],
-                        "advancements":[]
-                    },
-                    "subproject2":{
-                        "subsubproject1":{
-                            "information":"",
-                            "critical":[],
-                            "small":[],
-                            "advancements":[]
-                        },
-                        "subsubproject2":{
-                            "information":"",
-                            "critical":[],
-                            "small":[],
-                            "advancements":[]
-                        }
-                    }
                 }
             },
-            "upcoming_events":{
-                "service1":[],
-                "service2":[]
-            },
+            "upcoming_events":{},
             "metadata":{
-                "processed_files": "number (int) of processed files",
-                "fodler":"Name of the folder"
+                "processed_files": 1,
+                "folder": os.path.basename(pptx_folder)
             },
             "source_files":[
                 {
-                    "filename":"",
-                    "service_name":"",
-                    "processed":"True/False",
-                    "events_counts":"number of upcoming_events found in it"
-                },
-                {
-                    "filename":"",
-                    "service_name":"",
-                    "processed":"True/False",
-                    "events_counts":"number of upcoming_events found in it"
+                    "filename":"generated_from_text",
+                    "service_name":"Text Generator",
+                    "processed": True,
+                    "events_count": 0
                 }
             ]
         }

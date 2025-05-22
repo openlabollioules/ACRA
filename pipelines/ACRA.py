@@ -1633,6 +1633,8 @@ RENVOIE UNIQUEMENT LE JSON RÉORGANISÉ AVEC LA STRUCTURE COMPLÈTE."""
 /generate --> Génère tout le pptx en fonction du texte ( /generate [Avancements de la semaine])
 /merge --> Fusionne tous les fichiers pptx envoyés
 /regroup --> Regroupe les informations des projets similaires ou liés
+
+NOTE: Le système a été amélioré pour éviter la duplication d'informations. Les alertes (en couleur) apparaissent maintenant uniquement dans leur section correspondante et ne sont plus répétées dans les informations générales.
             """
             self.last_response = commands
             yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"
