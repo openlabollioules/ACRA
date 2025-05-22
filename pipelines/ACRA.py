@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","sr
 from core import summarize_ppt, get_slide_structure, generate_pptx_from_text
 from services import merge_pptx, delete_matching_files_in_openwebui
 
-from OLLibrary.utils.text_service import remove_tags_keep
+from OLLibrary.utils.text_service import remove_tags_keep, remove_tags_no_keep
 from OLLibrary.utils.log_service import setup_logging, get_logger
 from OLLibrary.utils.json_service import extract_json
 
@@ -39,14 +39,15 @@ class Pipeline:
         self.use_api = use_api_env.lower() in ("true", "1", "t", "yes", "y")
         print(f"USE_API: {self.use_api}")
         # self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
-        self.streaming_model = OllamaLLM(model="qwen3:30b-a3b", base_url="http://host.docker.internal:11434", num_ctx=131000, stream=True)
+        self.streaming_model = OllamaLLM(model="qwen3:30b-a3b", base_url="http://host.docker.internal:11434", num_ctx=32000, stream=True)
 
         self.api_url = "http://host.docker.internal:5050"
 
         self.openwebui_api = "http://host.docker.internal:3030/api/v1/"
         self.openwebui_db_path = os.getenv("OPENWEBUI_DB_PATH", "./open-webui/webui.db")
 
-        self.small_model = OllamaLLM(model="qwen2.5:3b", base_url="http://host.docker.internal:11434", num_ctx=131000)
+        # Réduire le contexte pour le petit modèle et activer le streaming
+        self.small_model = OllamaLLM(model="gemma3:latest", base_url="http://host.docker.internal:11434", num_ctx=16000, stream=True)
 
         self.file_path_list = []
         self.openwebui_api_key = os.getenv("OPENWEBUI_API_KEY")
@@ -56,7 +57,6 @@ class Pipeline:
 
         self.chat_id = ""
         self.current_chat_id = ""  # To track conversation changes
-        self.small_model = OllamaLLM(model="gemma3:latest", base_url="http://host.docker.internal:11434", num_ctx=64000)
         self.system_prompt = ""
         self.message_id = 0
         
@@ -388,7 +388,7 @@ class Pipeline:
         """
         prompt = f"Tu es un assistant spécialisé dans le traitement automatique des noms de fichiers. On te donne un nom de fichier de présentation (PowerPoint) contenant un identifiant unique suivi du titre du document. Ton objectif est d'extraire uniquement le titre du document dans un format propre et lisible pour un humain. Le titre est toujours situé après le dernier underscore (`_`) ou après une chaîne d'identifiants. Supprime l'extension `.pptx` ou toute autre extension. Remplace les underscores (`_`) ou tirets (`-`) par des espaces, et capitalise correctement chaque mot. Exemple : **Nom de fichier :** `dc56be63-37a6-4ed6-9223-50f545028ab4_CRA_SERVICE_UX.pptx`   **Titre extrait :** `Service UX` Donne uniquement le titre extrait (pas d'explication), en une seule ligne. voici le nom du fichier : {filename}"
         
-        service_name = self.small_model.invoke(prompt)
+        service_name = remove_tags_no_keep(self.small_model.invoke(prompt), '<think>', '</think>')
         # Nettoyer la réponse (enlever les espaces, retours à la ligne, etc.)
         return service_name.strip()
 
@@ -1456,28 +1456,55 @@ class Pipeline:
 
         elif "/regroup" in message:
             # First, get the structure of all files
-            structure_result = self.analyze_slide_structure(self.chat_id)
-            if "error" in structure_result:
-                response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
+            if self.cached_structure is None:
+                structure_result = self.analyze_slide_structure(self.chat_id)
+                if "error" in structure_result:
+                    response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
             else:
-                # Use the small model to regroup project information
-                regroup_prompt = f"""Tu es un assistant spécialisé dans la réorganisation de données de projets. Tu dois analyser la structure suivante et regrouper les informations des projets similaires ou liés. 
-                Pour chaque projet, tu dois:
-                1. Identifier les projets similaires ou liés
-                2. Fusionner leurs informations, alertes critiques, alertes à surveiller et avancements
-                3. Maintenir la hiérarchie des projets (projets principaux, sous-projets, etc.)
-                4. Conserver tous les événements à venir par service
-                5. Surtout ne pas modifier les informations des projets, juste les regrouper et les hiérarchiser.
+                # Optimiser le prompt pour le petit modèle
+                structure_result = self.cached_structure
                 
-                IMPORTANT: Tu dois renvoyer UNIQUEMENT un objet JSON valide, sans aucun texte avant ou après. Le JSON doit suivre exactement la même structure que l'input, avec les mêmes clés et types de données.
-                
-                Voici la structure actuelle:
-                {json.dumps(structure_result, indent=2, ensure_ascii=False)}
-                
-                Renvoie uniquement le JSON réorganisé, sans aucun autre texte."""
+                # Créer un prompt plus clair avec la structure exacte attendue
+                regroup_prompt = f"""Tu es un assistant spécialisé dans la réorganisation de données de projets. Tu vas regrouper les informations de projets similaires ou liés.
+
+TÂCHE:
+Analyser la structure de données ci-dessous et retourner une version réorganisée sous EXACTEMENT le même format.
+
+RÈGLES:
+1. Regrouper les projets similaires ou liés en un seul projet
+2. Ne pas modifier les informations des projets, seulement les regrouper
+3. Maintenir la hiérarchie de projets, sous-projets, etc.
+4. Conserver tous les événements à venir par service
+5. Éviter les duplications d'informations/alertes/événements
+6. IMPORTANT: Ton output DOIT contenir exactement la même structure que l'input, avec les mêmes clés au premier niveau ("projects", "upcoming_events", "metadata", "source_files")
+
+STRUCTURE ATTENDUE:
+{{
+  "projects": {{
+    "Nom_du_projet": {{
+      "information": "texte",
+      "critical": ["alerte 1", "alerte 2"],
+      "small": ["alerte mineure 1", "alerte mineure 2"],
+      "advancements": ["avancement 1", "avancement 2"]
+    }},
+    // ... autres projets
+  }},
+  "upcoming_events": {{
+    "Service1": ["événement 1", "événement 2"],
+    // ... autres services
+  }},
+  "metadata": {{ ... }},
+  "source_files": [ ... ]
+}}
+
+STRUCTURE À ANALYSER:
+{json.dumps(structure_result, indent=2, ensure_ascii=False)}
+
+RENVOIE UNIQUEMENT LE JSON RÉORGANISÉ AVEC LA STRUCTURE COMPLÈTE."""
                 
                 try:
-                    regrouped_structure = self.small_model.invoke(regroup_prompt)
+                    # Utiliser le petit modèle avec un contexte réduit
+                    regrouped_structure = remove_tags_no_keep(self.small_model.invoke(regroup_prompt), '<think>', '</think>')
                     
                     # Log the raw response for debugging
                     log.info(f"Raw model response: {regrouped_structure}")
@@ -1487,8 +1514,40 @@ class Pipeline:
                         regrouped_data = extract_json(regrouped_structure)
                         if not regrouped_data:
                             raise ValueError("No valid JSON could be extracted from the model's response")
+                        
+                        # Vérifier et corriger la structure si nécessaire
+                        log.info(f"Extracted JSON structure keys: {regrouped_data.keys() if isinstance(regrouped_data, dict) else 'Not a dict'}")
+                        
+                        # Si le modèle n'a retourné que la partie "projects", recréer la structure complète
+                        if isinstance(regrouped_data, dict) and "projects" not in regrouped_data:
+                            # Vérifier si le modèle a directement retourné le contenu de "projects"
+                            # (il y aurait des sous-dictionnaires avec information, critical, small, advancements)
+                            has_project_structure = False
+                            for key, value in regrouped_data.items():
+                                if isinstance(value, dict) and any(k in value for k in ["information", "critical", "small", "advancements"]):
+                                    has_project_structure = True
+                                    break
+                            
+                            if has_project_structure:
+                                log.info("Modèle a retourné directement le contenu de 'projects', reconstruction de la structure complète")
+                                original_data = regrouped_data
+                                regrouped_data = {
+                                    "projects": original_data,
+                                    "upcoming_events": structure_result.get("upcoming_events", {}),
+                                    "metadata": structure_result.get("metadata", {}),
+                                    "source_files": structure_result.get("source_files", [])
+                                }
+                            else:
+                                log.error(f"Structure JSON invalide: {regrouped_data}")
+                                raise ValueError("Invalid JSON structure: missing required fields and not a project structure")
+                        
+                        # Vérification finale de la structure
+                        if not isinstance(regrouped_data, dict) or "projects" not in regrouped_data:
+                            log.error(f"Structure JSON invalide après correction: {regrouped_data}")
+                            raise ValueError("Invalid JSON structure: missing required fields after correction")
+                        
                     except Exception as e:
-                        log.error(f"JSON extraction error: {str(e)}")
+                        log.error(f"JSON extraction/validation error: {str(e)}")
                         log.error(f"Invalid content: {regrouped_structure}")
                         response = f"Erreur lors de la réorganisation des données: impossible d'extraire un JSON valide. Détails: {str(e)}"
                         yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
@@ -1496,22 +1555,62 @@ class Pipeline:
                         self.last_response = response
                         return
                     
-                    # Create a new PowerPoint with the regrouped information
-                    output_regroup = "./OUTPUT/"+self.chat_id + "/regrouped/"
+                    # Créer directement la présentation en utilisant update_table_with_project_data
+                    from src.services.update_pttx_service import update_table_with_project_data
+                    from pptx import Presentation
+                    from pptx.util import Pt
+                    
+                    # Créer les dossiers nécessaires
+                    output_regroup = os.path.join("OUTPUT", self.chat_id, "regrouped")
                     os.makedirs(output_regroup, exist_ok=True)
                     
-                    # Convert the regrouped structure to a text format for the PowerPoint
-                    text_content = self.format_all_slide_data(regrouped_data)
+                    # Nom du fichier de sortie avec timestamp
+                    import datetime
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    output_file = os.path.join(output_regroup, f"regrouped_{timestamp}.pptx")
                     
-                    # Generate the PowerPoint
-                    report_result = self.generate_report(self.chat_id, text_content)
-                    
-                    if "error" in report_result:
-                        response = f"Erreur lors de la génération du rapport regroupé: {report_result['error']}"
+                    # Créer une présentation vide ou utiliser un template
+                    template_path = os.path.join("templates", "CRA_TEMPLATE_IA.pptx")
+                    if os.path.exists(template_path):
+                        prs = Presentation(template_path)
                     else:
-                        response = f"Les informations des projets ont été regroupées avec succès.\n\n### URL de téléchargement:\n{report_result.get('download_url', 'Non disponible')}"
-                        # Save mappings after uploading the new file
-                        self.save_file_mappings()
+                        prs = Presentation()
+                        slide = prs.slides.add_slide(prs.slide_layouts[5])  # Blank layout
+                        table_shape = slide.shapes.add_table(rows=10, cols=3, left=Pt(30), top=Pt(30), width=Pt(600), height=Pt(400))
+                    
+                    # Sauvegarder temporairement
+                    temp_path = os.path.join(output_regroup, "temp.pptx")
+                    prs.save(temp_path)
+                    
+                    # Mettre à jour la présentation avec les données regroupées
+                    try:
+                        # Utiliser le premier slide (index 0) et la première table (index 0)
+                        updated_path = update_table_with_project_data(
+                            temp_path, 
+                            0, 
+                            0, 
+                            regrouped_data["projects"],
+                            output_file,
+                            regrouped_data.get("upcoming_events", {})
+                        )
+                        
+                        # Supprimer le fichier temporaire
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        
+                        # Upload to OpenWebUI and get download URL
+                        upload_result = self.download_file_openwebui(updated_path)
+                        if "error" in upload_result:
+                            response = f"Les informations des projets ont été regroupées avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
+                        else:
+                            response = f"Les informations des projets ont été regroupées avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
+                            # Save mappings after uploading the new file
+                            self.save_file_mappings()
+                    except Exception as e:
+                        log.error(f"Error during PowerPoint generation: {str(e)}")
+                        log.exception("PowerPoint generation error details:")
+                        response = f"Erreur lors de la génération de la présentation PowerPoint: {str(e)}"
+                    
                 except Exception as e:
                     log.error(f"Error during regrouping: {str(e)}")
                     log.exception("Full error details:")

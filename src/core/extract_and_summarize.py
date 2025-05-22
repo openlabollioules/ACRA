@@ -406,7 +406,9 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     pour qu'elles soient plus concises tout en préservant les détails importants.
     
     Les alertes critiques, alertes mineures et avancements doivent être conservés tels quels,
-    mais tu peux éliminer les redondances éventuelles.
+    mais tu peux éliminer les redondances éventuelles. Soit vraiment le plus concis possible mais il faut également
+    pouvoir retransmettre le maximum d'informations. N'hésites pas à synthétiser en quelques mots (essaie de te contenir à 10 mots environs)
+    mais il ne faut pas perdre d'informations importantes.
     
     Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
     {temp_add_info}
