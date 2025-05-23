@@ -394,8 +394,9 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     }
     if add_info:
         prompt_inputs["temp_add_info"] = f"Voici des informations supplémentaires qui peuvent être utiles pour la synthèse: {add_info}"
+    
     # Create a prompt template for the LLM
-    summarization_template = PromptTemplate.from_template("""
+    summarization_template = """
     Tu es un assistant chargé de résumer des informations de projets et de les formater.
 
     Voici les données des projets:
@@ -405,19 +406,21 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     Pour chaque entrée, tu peux conserver la structure mais synthétise les informations
     pour qu'elles soient plus concises tout en préservant les détails importants.
     
-    TRÈS IMPORTANT: Pour éviter la duplication d'informations, quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, place-la UNIQUEMENT dans la catégorie correspondante (critical, small, advancements) et PAS dans le champ "information". Le champ "information" doit contenir UNIQUEMENT les informations neutres qui ne sont pas des alertes ou des avancements.
+    IMPORTANT: Inclus TOUTES les informations dans le champ "information" de chaque projet. MAIS quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, COPIE-LA ÉGALEMENT dans la catégorie correspondante (critical, small, advancements) pour qu'elle puisse être colorée. Ainsi, le texte apparaîtra dans le champ information mais sera automatiquement coloré.
+    
+    CONCERNANT LES ÉVÉNEMENTS À VENIR: Ne conserve dans la section "upcoming_events" QUE les informations qui sont EXPLICITEMENT des événements futurs. Si un élément ne mentionne pas clairement un événement à venir, retire-le de cette section. Si aucun événement futur n'est clairement identifié, laisse la section "upcoming_events" VIDE avec un objet vide {{}}.
     
     Les alertes critiques, alertes mineures et avancements doivent être conservés tels quels,
     mais tu peux éliminer les redondances éventuelles. Soit vraiment le plus concis possible mais il faut également
     pouvoir retransmettre le maximum d'informations. N'hésites pas à synthétiser en quelques mots (essaie de te contenir à 10 mots environs)
     mais il ne faut pas perdre d'informations importantes.
     
-    Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
     {temp_add_info}
 
-    """)
+    Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
+    """
     
-    # Generate the prompt
+    # Generate the prompt using direct format method
     prompt = summarization_template.format(**prompt_inputs)
     
     # Only try to use LLM if we have actual project data
@@ -427,7 +430,16 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     
     # Call the LLM to generate the summary in JSON format
     try:
+        # Check prompt size to warn about potential issues
+        prompt_size = len(prompt.encode('utf-8'))
+        print(f"Summarization prompt size: {prompt_size} bytes")
+        if prompt_size > 100000:  # 100KB threshold
+            print(f"WARNING: Large prompt detected ({prompt_size} bytes), LLM may timeout or fail")
+        
+        print("Calling LLM for summarization...")
         llm_response = summarize_model.invoke(prompt)
+        print("LLM response received successfully")
+        
         # Extract the JSON part from the response
         llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
         json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
@@ -440,11 +452,19 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
         json_str = json_str.strip()
         summarized_result = json.loads(json_str)
         
+        print("LLM summarization completed successfully")
         return summarized_result
         
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
+        print(f"Error type: {type(e).__name__}")
+        
+        # Check if it's a connection-related error
+        if "EOF" in str(e) or "Connection" in str(e) or "timeout" in str(e).lower():
+            print("Connection error detected - likely Ollama service issue or timeout")
+        
         # If summarization fails, return the raw aggregated data
+        print("Returning raw aggregated data as fallback")
         return result
 
 def Generate_pptx_from_text(pptx_folder, info=None):
@@ -472,7 +492,7 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         }
     
     # Create a prompt template for the LLM
-    summarization_template = PromptTemplate.from_template("""
+    summarization_template = """
     Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
 
     Voici les données textuelles à analyser:
@@ -484,9 +504,11 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     3. Les avancements significatifs (points positifs)
     4. Les alertes mineures (points à surveiller)
     5. Les alertes critiques (problèmes urgents)
-    6. Les événements à venir pour chaque projet ou catégorie
+    6. Les événements à venir pour chaque projet ou catégorie (UNIQUEMENT s'ils sont explicitement mentionnés)
 
-    TRÈS IMPORTANT: Pour éviter la duplication d'informations, quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, place-la UNIQUEMENT dans la catégorie correspondante (critical, small, advancements) et PAS dans le champ "information". Le champ "information" doit contenir UNIQUEMENT les informations neutres qui ne sont pas des alertes ou des avancements.
+    IMPORTANT: Inclus TOUTES les informations dans le champ "information" de chaque projet. MAIS quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, COPIE-LA ÉGALEMENT dans la catégorie correspondante (critical, small, advancements) pour qu'elle puisse être colorée. Ainsi, le texte apparaîtra dans le champ information mais sera automatiquement coloré.
+    
+    CONCERNANT LES ÉVÉNEMENTS À VENIR: Ne place des informations dans la section "upcoming_events" QUE s'il y a une mention EXPLICITE d'événements futurs, comme des phrases contenant "événements à venir", "semaine prochaine", "prochainement", etc. Si aucun événement futur n'est clairement mentionné, laisse la section "upcoming_events" VIDE avec un objet vide {{}}.
     
     Organise les informations selon le format JSON suivant:
     ```json
@@ -543,28 +565,32 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     Assure-toi de:
     1. Identifier correctement les différents projets mentionnés dans le texte
     2. Créer un résumé concis et informatif pour chaque projet mais ne perdez pas de points importants
-    3. Catégoriser correctement les informations en advancements, small_alerts, et critical_alerts
-    4. Une information NE DOIT JAMAIS apparaître à la fois dans "information" et dans une catégorie d'alerte
-    5. Organiser les événements à venir par catégories pertinentes
-    6. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
-    7. Assurer que tout soit en Français
-    8. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte
-    9. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles
-    10. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON
+    3. Inclure TOUT le texte dans le champ "information", rien ne doit être perdu
+    4. Ajouter AUSSI les informations importantes dans les catégories "advancements", "small", ou "critical" pour qu'elles soient colorées
+    5. Organiser les événements à venir par catégories pertinentes UNIQUEMENT s'ils sont explicitement mentionnés
+    6. Si aucun événement futur n'est mentionné (avec des termes comme "événements à venir", "semaine prochaine", etc.), LAISSER "upcoming_events" VIDE ({{}})
+    7. Répondre UNIQUEMENT avec le JSON formaté, sans texte d'introduction ni d'explication
+    8. Assurer que tout soit en Français
+    9. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte
+    10. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles
+    11. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON
+    """
     
-    """)
-    
-    # Prepare the inputs for the prompt
-    prompt_inputs = {
-        "text_data": info
-    }
-    
-    # Generate the prompt
-    prompt = summarization_template.format(**prompt_inputs)
+    # Format the prompt directly with f-string instead of using PromptTemplate
+    prompt = summarization_template.format(text_data=info)
     
     # Call the LLM to generate the summary in JSON format
     try:
+        # Check prompt size to warn about potential issues
+        prompt_size = len(prompt.encode('utf-8'))
+        print(f"Generate PPTX prompt size: {prompt_size} bytes")
+        if prompt_size > 100000:  # 100KB threshold
+            print(f"WARNING: Large prompt detected ({prompt_size} bytes), LLM may timeout or fail")
+        
+        print("Calling LLM for PPTX generation...")
         llm_response = summarize_model.invoke(prompt)
+        print("LLM response received successfully")
+        
         # Extract the JSON part from the response
         llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
         json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
@@ -579,10 +605,18 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         print("result :", result)
         print("result type :", type(result))
         
+        print("LLM PPTX generation completed successfully")
         return result
         
     except Exception as e:
         print(f"Error during LLM summarization: {str(e)}")
+        print(f"Error type: {type(e).__name__}")
+        
+        # Check if it's a connection-related error
+        if "EOF" in str(e) or "Connection" in str(e) or "timeout" in str(e).lower():
+            print("Connection error detected - likely Ollama service issue or timeout")
+        
+        print("Creating fallback structure due to LLM error")
         # Create a basic structure as fallback
         result = {
             "projects":{
