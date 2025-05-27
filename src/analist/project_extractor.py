@@ -1,4 +1,3 @@
-import os
 from pptx import Presentation
 import re
 import json

@@ -1,9 +1,6 @@
 import os,sys
-import shutil
 import uvicorn
-import uuid
 import logging
-from pptx import presentation
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse  
 from dotenv import load_dotenv

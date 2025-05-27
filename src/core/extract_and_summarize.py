@@ -1,9 +1,7 @@
 import os,sys
 import re
 import json
-from pptx import Presentation
 from langchain_core.prompts import PromptTemplate
-from copy import deepcopy
 from dotenv import load_dotenv
 import time
 
@@ -14,7 +12,7 @@ load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 
 from langchain_ollama import OllamaLLM
-summarize_model = OllamaLLM(model="deepseek-r1:32b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
+summarize_model = OllamaLLM(model="qwen3:30b-a3b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
 
 from analist import extract_projects_from_presentation
 from OLLibrary.utils.text_service import remove_tags_no_keep

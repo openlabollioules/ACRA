@@ -1,9 +1,7 @@
 import os
 import sqlite3
 import shutil
-import sys
 import requests
-import logging
 from typing import List, Set
 
 from OLLibrary.utils.log_service import get_logger, setup_logging
