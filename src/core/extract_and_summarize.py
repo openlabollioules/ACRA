@@ -5,6 +5,7 @@ from pptx import Presentation
 from langchain_core.prompts import PromptTemplate
 from copy import deepcopy
 from dotenv import load_dotenv
+import time
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -94,7 +95,7 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     
     Parameters:
       pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
-    
+      add_info (str, optional): Additional information to include in the summary.
     Returns:
       dict: A nested dictionary with project/subproject structure containing information and alerts
     """
@@ -588,6 +589,10 @@ def Generate_pptx_from_text(pptx_folder, info=None):
             print(f"WARNING: Large prompt detected ({prompt_size} bytes), LLM may timeout or fail")
         
         print("Calling LLM for PPTX generation...")
+        
+        # Add a small delay to prevent immediate consecutive LLM calls
+        time.sleep(1)  # 1 second delay
+        
         llm_response = summarize_model.invoke(prompt)
         print("LLM response received successfully")
         
@@ -609,40 +614,42 @@ def Generate_pptx_from_text(pptx_folder, info=None):
         return result
         
     except Exception as e:
-        print(f"Error during LLM summarization: {str(e)}")
+        error_str = str(e)
+        print(f"Error during LLM PPTX generation: {error_str}")
         print(f"Error type: {type(e).__name__}")
         
         # Check if it's a connection-related error
-        if "EOF" in str(e) or "Connection" in str(e) or "timeout" in str(e).lower():
-            print("Connection error detected - likely Ollama service issue or timeout")
+        if any(keyword in error_str.lower() for keyword in ["eof", "connection", "timeout", "timed out"]):
+            print("Connection/timeout error detected during PPTX generation - likely Ollama service issue or timeout")
+        elif "ollama" in error_str.lower():
+            print("Ollama service error detected during PPTX generation")
         
-        print("Creating fallback structure due to LLM error")
-        # Create a basic structure as fallback
-        result = {
-            "projects":{
-                "Général":{
-                    "information":"Informations extraites du texte fourni",
-                    "critical":[],
-                    "small":[],
-                    "advancements":[]
+        # If generation fails, return a basic structure with error info
+        print("Returning basic structure as fallback due to LLM error")
+        return {
+            "projects": {
+                "Erreur de génération": {
+                    "information": f"Une erreur s'est produite lors de la génération automatique: {error_str}. Contenu original: {info[:500]}...",
+                    "critical": ["Erreur de génération LLM"],
+                    "small": [],
+                    "advancements": []
                 }
             },
-            "upcoming_events":{},
-            "metadata":{
+            "upcoming_events": {},
+            "metadata": {
                 "processed_files": 1,
-                "folder": os.path.basename(pptx_folder)
+                "folder": os.path.basename(pptx_folder),
+                "error": error_str
             },
-            "source_files":[
+            "source_files": [
                 {
-                    "filename":"generated_from_text",
-                    "service_name":"Text Generator",
-                    "processed": True,
-                    "events_count": 0
+                    "filename": "generated_from_text_with_error",
+                    "service_name": "Text Generator",
+                    "processed": False,
+                    "error": error_str
                 }
             ]
         }
-                
-        return result
 
 if __name__ == "__main__":
     folder = "pptx_folder"  # Update with your actual folder path

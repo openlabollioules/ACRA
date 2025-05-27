@@ -32,6 +32,7 @@ services:
       environment:
         - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt
         - MAPPINGS_FOLDER=/app/mappings
+        - OLLAMA_HOST=host.docker.internal
       networks:
         - webui-net
         

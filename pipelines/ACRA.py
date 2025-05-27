@@ -3,21 +3,18 @@ import os
 import sys
 import shutil
 import requests
-import uuid
 import sqlite3
 import time
-from typing import List, Union, Generator, Iterator, Dict, Any, Callable, Optional
+from typing import List, Generator
 from langchain_ollama import  OllamaLLM
 from dotenv import load_dotenv
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
 from core import summarize_ppt, get_slide_structure, generate_pptx_from_text
-from services import merge_pptx, delete_matching_files_in_openwebui
+from services import merge_pptx
 
-from OLLibrary.utils.text_service import remove_tags_keep, remove_tags_no_keep
+from OLLibrary.utils.text_service import remove_tags_no_keep
 from OLLibrary.utils.log_service import setup_logging, get_logger
 from OLLibrary.utils.json_service import extract_json
-
-import logging
 
 # Set up the main application logger
 setup_logging(app_name="ACRA_Pipeline")
@@ -28,74 +25,11 @@ OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
 # Use absolute path for mappings folder
 MAPPINGS_FOLDER = os.path.abspath(os.getenv("MAPPINGS_FOLDER", os.path.join(os.getcwd(), "mappings")))
 
-class EventEmitter:
-    """
-    Event emitter class for real-time status updates during pipeline operations.
-    Similar to the one used in generate_docx.py but adapted for the ACRA Pipeline.
-    """
-    def __init__(self, event_emitter: Callable[[dict], Any] = None):
-        self.event_emitter = event_emitter
-
-    async def emit(self, description="Unknown State", status="in_progress", done=False, data=None):
-        """
-        Emit a status event with description, status, and optional data.
-        
-        Args:
-            description (str): Description of the current operation
-            status (str): Status of the operation ("in_progress", "completed", "error", "warning")
-            done (bool): Whether the operation is complete
-            data (dict, optional): Additional data to include in the event
-        """
-        if self.event_emitter:
-            event_data = {
-                "type": "status",
-                "data": {
-                    "description": description,
-                    "status": status,
-                    "done": done,
-                }
-            }
-            if data:
-                event_data["data"].update(data)
-            
-            try:
-                await self.event_emitter(event_data)
-            except Exception as e:
-                # Fallback to regular logging if event emitter fails
-                log.warning(f"Event emitter failed: {str(e)}")
-
-    def emit_sync(self, description="Unknown State", status="in_progress", done=False, data=None):
-        """
-        Synchronous version of emit for use in non-async contexts.
-        """
-        if self.event_emitter:
-            event_data = {
-                "type": "status",
-                "data": {
-                    "description": description,
-                    "status": status,
-                    "done": done,
-                }
-            }
-            if data:
-                event_data["data"].update(data)
-            
-            try:
-                # Try to emit the event (will work if event_emitter supports sync calls)
-                self.event_emitter(event_data)
-            except Exception as e:
-                # Fallback to regular logging if event emitter fails
-                log.warning(f"Sync event emitter failed: {str(e)}")
-
 class Pipeline:
-    def __init__(self, event_emitter: Callable[[dict], Any] = None):
+    def __init__(self):
         load_dotenv()
         log.info("Initializing ACRA Pipeline")
         self.last_response = None
-        
-        # Initialize event emitter
-        self.emitter = EventEmitter(event_emitter)
-        self.emitter.emit_sync("Initializing ACRA Pipeline", "in_progress")
 
         # Fix: Properly convert USE_API to boolean
         use_api_env = os.getenv("USE_API", "False")
@@ -110,13 +44,12 @@ class Pipeline:
         self.openwebui_db_path = os.getenv("OPENWEBUI_DB_PATH", "./open-webui/webui.db")
 
         # Réduire le contexte pour le petit modèle et activer le streaming
-        self.small_model = OllamaLLM(model="gemma3:latest", base_url="http://host.docker.internal:11434", num_ctx=16000, stream=True)
+        self.small_model = OllamaLLM(model="qwen2.5:14b", base_url="http://host.docker.internal:11434", num_ctx=16000, stream=True)
 
         self.file_path_list = []
         self.openwebui_api_key = os.getenv("OPENWEBUI_API_KEY")
         if not self.openwebui_api_key:
             log.error("OPENWEBUI_API_KEY is not set")
-            self.emitter.emit_sync("Missing OpenWebUI API Key", "error", True)
             raise ValueError("OPENWEBUI_API_KEY is not set")
 
         self.chat_id = ""
@@ -139,7 +72,6 @@ class Pipeline:
         try:
             global MAPPINGS_FOLDER
             log.info(f"Creating mappings directory at {MAPPINGS_FOLDER}")
-            self.emitter.emit_sync("Setting up mappings directory", "in_progress")
             os.makedirs(MAPPINGS_FOLDER, exist_ok=True)
             # Test if we can write to the directory
             test_file_path = os.path.join(MAPPINGS_FOLDER, "test_write.txt")
@@ -147,15 +79,12 @@ class Pipeline:
                 f.write("Test write access")
             os.remove(test_file_path)
             log.info(f"Mappings directory created and writable at {MAPPINGS_FOLDER}")
-            self.emitter.emit_sync("Mappings directory ready", "completed")
         except Exception as e:
             log.error(f"Error creating or accessing mappings directory: {str(e)}")
-            self.emitter.emit_sync("Mappings directory setup failed", "error", data={"error": str(e)})
             # Fallback to using OUTPUT_FOLDER for mappings
             log.warning(f"Using OUTPUT_FOLDER for mappings as fallback")
             MAPPINGS_FOLDER = os.path.abspath(OUTPUT_FOLDER)
         
-        self.emitter.emit_sync("ACRA Pipeline initialized successfully", "completed", True)
         log.info("ACRA Pipeline initialized successfully")
 
     def generate_report(self, foldername, info):
@@ -171,40 +100,29 @@ class Pipeline:
             dict: Résultat de la requête avec l'URL de téléchargement
         """
         log.info(f"Generating report for folder: {foldername}")
-        self.emitter.emit_sync("Starting report generation", "in_progress", data={"folder": foldername})
         log.info(f"use_api setting is: {self.use_api}")
         
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info(f"Creating report with timestamp: {timestamp}")
-        self.emitter.emit_sync("Generated timestamp for report", "in_progress", data={"timestamp": timestamp})
         
         if self.use_api:
             log.info("Using API endpoint to generate report")
-            self.emitter.emit_sync("Using API endpoint for report generation", "in_progress")
             endpoint = f"generate_report/{foldername}?info={info}&timestamp={timestamp}"
             result = self.fetch(endpoint)
             if "error" in result:
-                self.emitter.emit_sync("API report generation failed", "error", True, data={"error": result["error"]})
                 return result
                 
-            self.emitter.emit_sync("API report generated, uploading to OpenWebUI", "in_progress")
-            upload_result = self.download_file_openwebui(result["summary"])
-            self.emitter.emit_sync("Report generation completed", "completed", True)
-            return upload_result
+            return self.download_file_openwebui(result["summary"])
 
         log.info("Using direct function call to generate report")
-        self.emitter.emit_sync("Using direct function call for report generation", "in_progress")
         result = generate_pptx_from_text(foldername, info, timestamp)
         if "error" in result:
-            self.emitter.emit_sync("Direct report generation failed", "error", True, data={"error": result["error"]})
             return result
             
-        self.emitter.emit_sync("Direct report generated, uploading to OpenWebUI", "in_progress")
         upload_result = self.download_file_openwebui(result["summary"])
         # Save the mapping after uploading the new file
         self.save_file_mappings()
-        self.emitter.emit_sync("Report generation completed successfully", "completed", True)
         return upload_result
 
     def reset_conversation_state(self):
@@ -333,14 +251,10 @@ class Pipeline:
             if file_path in self.file_id_mapping:
                 file_id = self.file_id_mapping[file_path]
                 log.info(f"File already uploaded, reusing ID: {file_id}")
-                self.emitter.emit_sync("Reusing existing file upload", "completed", 
-                                     data={"file_id": file_id, "filename": os.path.basename(file)})
                 download_url = f"http://localhost:3030/api/v1/files/{file_id}/content"
                 log.info(f"Reusing existing download URL: {download_url}")
                 return {"download_url": download_url}
             
-            self.emitter.emit_sync("Uploading file to OpenWebUI", "in_progress", 
-                                 data={"filename": os.path.basename(file)})
             headers = {
                 "accept": "application/json",
                 # Remove Content-Type header to let requests set it automatically for multipart/form-data
@@ -361,8 +275,6 @@ class Pipeline:
                     
                     if response.status_code != 200:
                         log.error(f"File upload failed: {response.status_code} - {response.text}")
-                        self.emitter.emit_sync("File upload failed", "error", True, 
-                                             data={"status_code": response.status_code, "error": response.text})
                         return {"error": f"File upload failed: {response.status_code}"}
                     
                     # Parse the response
@@ -372,17 +284,13 @@ class Pipeline:
                     
                     if not file_id:
                         log.error("No file ID returned from upload")
-                        self.emitter.emit_sync("No file ID returned from upload", "error", True)
                         return {"error": "No file ID returned from upload"}
                     
                     # Store in our mapping
                     self.file_id_mapping[file_path] = file_id
                     log.info(f"Added file mapping: {file_path} -> {file_id}")
-                    self.emitter.emit_sync("File uploaded successfully", "completed", 
-                                         data={"file_id": file_id, "filename": os.path.basename(file)})
             except Exception as e:
                 log.error(f"Error uploading file: {str(e)}")
-                self.emitter.emit_sync("File upload error", "error", True, data={"error": str(e)})
                 return {"error": f"Error uploading file: {str(e)}"}
             
             download_url = f"http://localhost:3030/api/v1/files/{file_id}/content"
@@ -390,7 +298,6 @@ class Pipeline:
             return {"download_url": download_url}
         except Exception as e:
             log.error(f"Error in download_file_openwebui: {str(e)}")
-            self.emitter.emit_sync("OpenWebUI upload process error", "error", True, data={"error": str(e)})
             return {"error": f"Error in download_file_openwebui: {str(e)}"}
     
     def summarize_folder(self, foldername=None, add_info=None):
@@ -408,18 +315,15 @@ class Pipeline:
             foldername = self.chat_id
         
         log.info(f"Summarizing folder: {foldername}")
-        self.emitter.emit_sync("Starting folder summarization", "in_progress", data={"folder": foldername})
         log.info(f"use_api setting is: {self.use_api}")
         log.info(f"Additional info: {add_info}")
         
         import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info(f"Creating summary with timestamp: {timestamp}")
-        self.emitter.emit_sync("Generated timestamp for summary", "in_progress", data={"timestamp": timestamp})
         
         if self.use_api:
             log.info("Using API endpoint to summarize folder")
-            self.emitter.emit_sync("Using API endpoint for summarization", "in_progress")
             endpoint = f"acra/{foldername}"
             if add_info:
                 endpoint += f"?add_info={add_info}&timestamp={timestamp}"
@@ -427,11 +331,9 @@ class Pipeline:
                 endpoint += f"?timestamp={timestamp}"
             result = self.fetch(endpoint)
             if "error" in result:
-                self.emitter.emit_sync("API summarization failed", "error", True, data={"error": result["error"]})
                 return result
             
             # Let's make sure both the output file and the source files are properly tracked
-            self.emitter.emit_sync("API summary generated, tracking source files", "in_progress")
             # First, track source files from the pptx_folder
             source_folder = os.path.join(UPLOAD_FOLDER, foldername)
             if os.path.exists(source_folder):
@@ -444,25 +346,19 @@ class Pipeline:
                             # Will be uploaded and added to mapping when needed
             
             # Then get the download URL for the new summary file
-            self.emitter.emit_sync("Uploading summary to OpenWebUI", "in_progress")
             upload_result = self.download_file_openwebui(result["summary"])
             self.save_file_mappings()  # Save all mappings
-            self.emitter.emit_sync("Folder summarization completed successfully", "completed", True)
             return upload_result
         
         log.info("Using direct function call to summarize folder")
-        self.emitter.emit_sync("Using direct function call for summarization", "in_progress")
         result = summarize_ppt(foldername, add_info, timestamp)
         if "error" in result:
-            self.emitter.emit_sync("Direct summarization failed", "error", True, data={"error": result["error"]})
             return result
         
         # Track both the output file and source files
-        self.emitter.emit_sync("Direct summary generated, uploading to OpenWebUI", "in_progress")
         upload_result = self.download_file_openwebui(result["summary"])
         
         # Track source files
-        self.emitter.emit_sync("Tracking source files", "in_progress")
         source_folder = os.path.join(UPLOAD_FOLDER, foldername)
         if os.path.exists(source_folder):
             for filename in os.listdir(source_folder):
@@ -475,7 +371,6 @@ class Pipeline:
         
         # Save the mapping after uploading all files
         self.save_file_mappings()
-        self.emitter.emit_sync("Folder summarization completed successfully", "completed", True)
         return upload_result
 
     def extract_service_name(self, filename):
@@ -509,39 +404,22 @@ class Pipeline:
         
         # Ensure foldername is not None after fallback to self.chat_id
         if foldername is None:
-            self.emitter.emit_sync("Analysis failed: no folder specified", "error", True)
             raise Exception("Le nom du dossier et le chat_id sont tous deux None. Impossible d'analyser la structure des diapositives.")
         
         log.info(f"Analyzing slide structure for folder: {foldername}")
-        self.emitter.emit_sync("Starting slide structure analysis", "in_progress", data={"folder": foldername})
         log.info(f"use_api setting is: {self.use_api}")
         
         if self.use_api:
             log.info("Using API endpoint to get slide structure")
-            self.emitter.emit_sync("Using API endpoint for structure analysis", "in_progress")
-            result = self.fetch(f"get_slide_structure/{foldername}")
-            if "error" in result:
-                self.emitter.emit_sync("API structure analysis failed", "error", True, data={"error": result["error"]})
-            else:
-                self.emitter.emit_sync("Structure analysis completed successfully", "completed", True)
-            return result
+            return self.fetch(f"get_slide_structure/{foldername}")
         
         log.info("Using direct function call to get slide structure")
-        self.emitter.emit_sync("Using direct function call for structure analysis", "in_progress")
-        result = get_slide_structure(foldername)
-        if "error" in result:
-            self.emitter.emit_sync("Direct structure analysis failed", "error", True, data={"error": result["error"]})
-        else:
-            self.emitter.emit_sync("Structure analysis completed successfully", "completed", True)
-        return result
+        return get_slide_structure(foldername)
     
     def format_all_slide_data(self, data: dict) -> str:
         """
         Formate les données de plusieurs présentations PPTX en une seule chaîne de texte structurée,
         regroupant tous les projets sans séparation par fichier et avec les événements à venir par service.
-        
-        Si une structure traitée existe déjà en cache et que data n'est pas None, utilise la structure en cache.
-        Sinon, traite la structure et la stocke en cache.
 
         Args:
             data (dict): Dictionnaire contenant les projets et métadonnées conforme au nouveau format.
@@ -553,11 +431,8 @@ class Pipeline:
         if not data:
             return "Aucun fichier PPTX fourni."
             
-        # Si data est fourni, mettre à jour le cache
-        self.cached_structure = data
-        
-        # Utiliser la structure en cache si elle existe
-        structure_to_process = self.cached_structure
+        # Utiliser directement les données fournies sans modifier le cache
+        structure_to_process = data
         
         # Vérifier si nous avons des projets
         projects = structure_to_process.get("projects", {})
@@ -658,7 +533,6 @@ class Pipeline:
             foldername = self.chat_id
         
         log.info(f"Deleting all files for folder: {foldername}")
-        self.emitter.emit_sync("Starting file deletion process", "in_progress", data={"folder": foldername})
         
         # Get folder paths for both pptx_folder and OUTPUT
         pptx_folder_path = os.path.join(UPLOAD_FOLDER, foldername)
@@ -670,14 +544,11 @@ class Pipeline:
         
         # 1. D'abord, supprimer les fichiers dans OpenWebUI
         log.info(f"Suppression des fichiers OpenWebUI pour le chat: {foldername}")
-        self.emitter.emit_sync("Deleting files from OpenWebUI", "in_progress")
         webui_result = self.delete_openwebui_files_for_chat(foldername)
         deleted_webui_files = webui_result.get("deleted_count", 0)
         log.info(f"Résultat de la suppression OpenWebUI: {webui_result}")
-        self.emitter.emit_sync(f"Deleted {deleted_webui_files} files from OpenWebUI", "in_progress", data={"deleted_webui_files": deleted_webui_files})
         
         # Delete files from pptx_folder
-        self.emitter.emit_sync("Deleting local files", "in_progress")
         if self.use_api:
             log.info(f"Using API to delete files from {pptx_folder_path}")
             url = f"{self.api_url}/delete_all_pptx_files/{foldername}"
@@ -688,7 +559,6 @@ class Pipeline:
             try:
                 if os.path.exists(pptx_folder_path):
                     files = os.listdir(pptx_folder_path)
-                    self.emitter.emit_sync(f"Found {len(files)} files to delete", "in_progress", data={"file_count": len(files)})
                     for file in files:
                         file_path = os.path.join(pptx_folder_path, file)
                         abs_path = os.path.abspath(file_path)
@@ -705,18 +575,14 @@ class Pipeline:
                         log.info(f"Deleted file: {file_path}")
                         
                     log.info(f"Deleted {deleted_count} files from pptx_folder")
-                    self.emitter.emit_sync(f"Deleted {deleted_count} local files", "in_progress", data={"deleted_local_files": deleted_count})
                     result = {"message": f"{deleted_count} fichiers supprimés avec succès."}
                 else:
                     result = {"message": "Le dossier n'existe pas."}
-                    self.emitter.emit_sync("Source folder does not exist", "warning")
             except Exception as e:
                 log.error(f"Error deleting files from pptx_folder: {str(e)}")
-                self.emitter.emit_sync("Error during local file deletion", "error", data={"error": str(e)})
                 result = {"error": f"Erreur lors de la suppression des fichiers: {str(e)}"}
         
         # Also clean up any files in the OUTPUT folder for this conversation
-        self.emitter.emit_sync("Cleaning up output folder", "in_progress")
         try:
             if os.path.exists(output_folder_path):
                 output_files = os.listdir(output_folder_path)
@@ -739,33 +605,27 @@ class Pipeline:
                         log.info(f"Deleted output file: {file_path}")
                 
                 log.info(f"Deleted {output_deleted} files from OUTPUT folder")
-                self.emitter.emit_sync(f"Deleted {output_deleted} output files", "in_progress", data={"deleted_output_files": output_deleted})
                 
                 # Update the result message
                 if "message" in result:
                     result["message"] += f" Plus {output_deleted} fichiers supprimés du dossier de sortie."
         except Exception as e:
             log.error(f"Error cleaning up OUTPUT folder: {str(e)}")
-            self.emitter.emit_sync("Error cleaning output folder", "warning", data={"error": str(e)})
             # Don't override the main result if there was an error here
         
         # Also clean up any mapping files for this conversation
-        self.emitter.emit_sync("Cleaning up mapping files", "in_progress")
         try:
             mapping_file = os.path.join(MAPPINGS_FOLDER, f"{foldername}_file_mappings.json")
             if os.path.exists(mapping_file):
                 os.remove(mapping_file)
                 log.info(f"Deleted mapping file: {mapping_file}")
-                self.emitter.emit_sync("Mapping file deleted", "in_progress")
                 result["message"] += f" Fichier de mapping supprimé."
         except Exception as e:
             log.error(f"Error deleting mapping file: {str(e)}")
-            self.emitter.emit_sync("Error deleting mapping file", "warning", data={"error": str(e)})
         
         # Save the updated mappings (empty for this conversation)
         if removed_mappings > 0:
             log.info(f"Removed {removed_mappings} file mappings. Saving updated mappings.")
-            self.emitter.emit_sync(f"Updated {removed_mappings} file mappings", "in_progress", data={"removed_mappings": removed_mappings})
             self.file_id_mapping = {}  # Clear all mappings for this conversation
             self.save_file_mappings()
         
@@ -777,12 +637,6 @@ class Pipeline:
         if "message" in result:
             result["message"] += f" {deleted_webui_files} fichiers supprimés d'OpenWebUI."
         result["deleted_webui_files"] = deleted_webui_files
-        
-        self.emitter.emit_sync("File deletion completed", "completed", True, data={
-            "deleted_local_files": deleted_count,
-            "deleted_webui_files": deleted_webui_files,
-            "removed_mappings": removed_mappings
-        })
         
         return result
     
@@ -1109,7 +963,6 @@ class Pipeline:
 
     async def inlet(self, body: dict, user: dict) -> dict:
         log.info(f"Received body: {body}")
-        self.emitter.emit_sync("Processing incoming request", "in_progress")
         log.info(f"Metadata: {body.get('metadata', {})}")
         
         # Debug log the current state
@@ -1120,7 +973,6 @@ class Pipeline:
         if "metadata" in body and "chat_id" in body["metadata"]:
             new_chat_id = body["metadata"]["chat_id"]
             log.info(f"New chat_id extracted from request metadata: '{new_chat_id}'")
-            self.emitter.emit_sync("Extracted chat ID from request", "in_progress", data={"chat_id": new_chat_id})
             
             # Check if this is actually a change
             is_change = new_chat_id != self.chat_id
@@ -1131,7 +983,6 @@ class Pipeline:
             # If chat_id changed, we need to save current mappings and load new ones
             if is_change and has_previous:
                 log.info(f"*** CHAT ID CHANGED *** from '{self.chat_id}' to '{new_chat_id}'")
-                self.emitter.emit_sync("Chat ID changed, performing cleanup", "in_progress", data={"old_chat": self.chat_id, "new_chat": new_chat_id})
                 
                 # Save current mappings before changing IDs
                 self.save_file_mappings()  # Save mappings for old chat
@@ -1147,7 +998,6 @@ class Pipeline:
                 # Directly delete old folders if they're not in active chats
                 if old_chat_id not in active_chats and old_chat_id != new_chat_id:
                     log.info(f"Directly cleaning up old chat ID folders: {old_chat_id}")
-                    self.emitter.emit_sync("Cleaning up old chat folders", "in_progress", data={"old_chat": old_chat_id})
                     
                     # Supprimer d'abord les fichiers OpenWebUI
                     log.info(f"Suppression des fichiers OpenWebUI pour le chat: {old_chat_id}")
@@ -1186,7 +1036,6 @@ class Pipeline:
                 
                 # Run the general cleanup as well
                 log.info(f"Running general cleanup for chat ID change")
-                self.emitter.emit_sync("Running general cleanup", "in_progress")
                 try:
                     cleanup_result = self.cleanup_orphaned_conversations()
                     log.info(f"Cleanup results: {cleanup_result}")
@@ -1195,10 +1044,8 @@ class Pipeline:
                     log.info(f"Performing forced cleanup to ensure old folders are removed")
                     force_result = self.force_cleanup_old_folders([new_chat_id])
                     log.info(f"Force cleanup results: {force_result}")
-                    self.emitter.emit_sync("Cleanup completed", "completed", data={"cleanup_result": cleanup_result})
                 except Exception as e:
                     log.error(f"Cleanup process failed: {str(e)}")
-                    self.emitter.emit_sync("Cleanup failed", "error", data={"error": str(e)})
                     log.exception("Cleanup exception details:")
                 
                 # Reset state but preserve file mappings
@@ -1209,7 +1056,6 @@ class Pipeline:
             elif not self.chat_id and new_chat_id:
                 # First time setting chat_id
                 log.info(f"Setting initial chat_id to {new_chat_id}")
-                self.emitter.emit_sync("Setting initial chat ID", "in_progress", data={"chat_id": new_chat_id})
                 self.chat_id = new_chat_id
                 self.load_file_mappings()  # Try to load any existing mappings
                 
@@ -1217,10 +1063,8 @@ class Pipeline:
                 self.current_chat_id = new_chat_id
         else:
             log.warning("No chat_id found in metadata!")
-            self.emitter.emit_sync("No chat ID found in request", "warning")
 
         # Create folders for the conversation
-        self.emitter.emit_sync("Setting up conversation folders", "in_progress")
         # Create pptx_folder for source files
         conversation_folder = os.path.join(UPLOAD_FOLDER, self.chat_id)
         os.makedirs(conversation_folder, exist_ok=True)
@@ -1233,17 +1077,15 @@ class Pipeline:
         
         # Create mappings folder if needed
         os.makedirs(MAPPINGS_FOLDER, exist_ok=True)
-        self.emitter.emit_sync("Conversation folders ready", "completed")
 
         # Extract files from body['metadata']['files']
         files = body.get("metadata", {}).get("files", [])
         if files:
-            self.emitter.emit_sync(f"Processing {len(files)} uploaded files", "in_progress", data={"file_count": len(files)})
             # Réinitialiser la structure en cache car de nouveaux fichiers ont été ajoutés
             self.cached_structure = None
             
             # Traiter les fichiers
-            for i, file_entry in enumerate(files):
+            for file_entry in files:
                 file_data = file_entry.get("file", {})
                 filename = file_data.get("filename", "N/A")
                 file_id = file_data.get("id", "N/A")
@@ -1253,9 +1095,6 @@ class Pipeline:
                 source_path = os.path.join("./uploads", filecomplete_name)
                 # Update destination to use conversation foldername
                 destination_path = os.path.join(conversation_folder, filecomplete_name)
-                
-                self.emitter.emit_sync(f"Processing file {i+1}/{len(files)}: {filename}", "in_progress", 
-                                     data={"filename": filename, "file_index": i+1, "total_files": len(files)})
                 
                 self.file_path_list.append(destination_path)
                 shutil.copy(source_path, destination_path)
@@ -1271,17 +1110,14 @@ class Pipeline:
                 log.info(f"File {filename} identified as service: {service_name}")
                 
             # Analyser la structure
-            self.emitter.emit_sync("Analyzing file structure", "in_progress")
             response = self.analyze_slide_structure(self.chat_id)
             if "error" in response:
-                self.emitter.emit_sync("Structure analysis failed", "error", data={"error": response["error"]})
                 response = f"Erreur lors de l'analyse de la structure: {response['error']}"
             else:
-                # Formater la réponse
-                self.emitter.emit_sync("Formatting structure data", "in_progress")
-                response = self.format_all_slide_data(response)
-                # Stocker la structure en cache
+                # Sauvegarder la structure JSON brute dans le cache
                 self.cached_structure = response
+                # Formater la réponse pour l'affichage
+                response = self.format_all_slide_data(response)
                 
             self.system_prompt = "# Voici les informations des fichiers PPTX toutes les informations sont importantes pour la compréhension du message de l'utilisateur et les données sont triées : \n\n" +  response + "# voici le message de l'utilisateur : " 
             
@@ -1441,7 +1277,6 @@ class Pipeline:
         
         # Gestion des commandes spécifiques
         if "/summarize" in message:
-            self.emitter.emit_sync("Processing summarize command", "in_progress")
             # Extract additional information after the /summarize command
             additional_info = None
             if " " in message:
@@ -1450,13 +1285,10 @@ class Pipeline:
                     additional_info = command_parts[1].strip()
             
             # Get existing summaries
-            self.emitter.emit_sync("Checking for existing summaries", "in_progress")
             existing_summaries = self.get_existing_summaries()
             log.info(f"ACRA - Pipeline: Existing summaries: {existing_summaries}")
             
             if existing_summaries:
-                self.emitter.emit_sync(f"Found {len(existing_summaries)} existing summaries", "completed", 
-                                     data={"summary_count": len(existing_summaries)})
                 response = "Voici les résumés existants pour cette conversation:\n\n"
                 for filename, url in existing_summaries:
                     response += f"- {filename}: {url}\n"
@@ -1474,7 +1306,6 @@ class Pipeline:
                 return
             else:
                 # No existing summaries, generate one directly
-                self.emitter.emit_sync("No existing summaries found, generating new one", "in_progress")
                 response = self.summarize_folder(add_info=additional_info)
                 if "error" in response:
                     response = {"error": f"Erreur lors de la génération du résumé: {response['error']}"}
@@ -1495,7 +1326,6 @@ class Pipeline:
                 return
         
         elif "/structure" in message:
-            self.emitter.emit_sync("Processing structure command", "in_progress")
             if self.cached_structure is None:
                 # Récupérer la structure des diapositives
                 response = self.analyze_slide_structure(self.chat_id)
@@ -1509,9 +1339,10 @@ class Pipeline:
                     self.last_response = response_text
                     return
                 
-                # Formater les données de la structure
+                # Sauvegarder la structure JSON brute dans le cache
+                self.cached_structure = response
+                # Formater les données de la structure pour l'affichage
                 formatted_response = self.format_all_slide_data(response)
-                self.cached_structure = formatted_response
                 if __event_emitter__:
                     __event_emitter__({"type": "content", "content": formatted_response})
                 yield f"data: {json.dumps({'choices': [{'message': {'content': formatted_response}}]})}\n\n"
@@ -1519,12 +1350,16 @@ class Pipeline:
                 self.last_response = formatted_response
                 return
             else:
-                self.emitter.emit_sync("Using cached structure", "completed")
+                # Utiliser la structure en cache pour formater l'affichage
+                if isinstance(self.cached_structure, dict):
+                    formatted_response = self.format_all_slide_data(self.cached_structure)
+                else:
+                    formatted_response = self.cached_structure
                 if __event_emitter__:
-                    __event_emitter__({"type": "content", "content": self.cached_structure})
-                yield f"data: {json.dumps({'choices': [{'message': {'content': self.cached_structure}}]})}\n\n"
+                    __event_emitter__({"type": "content", "content": formatted_response})
+                yield f"data: {json.dumps({'choices': [{'message': {'content': formatted_response}}]})}\n\n"
                 yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = self.cached_structure
+                self.last_response = formatted_response
                 return
         elif "/generate" in message:
             # Extraire le texte après la commande
@@ -1589,32 +1424,23 @@ class Pipeline:
             return
 
         elif "/merge" in message:
-            self.emitter.emit_sync("Processing merge command", "in_progress")
             output_merge = "./OUTPUT/"+self.chat_id + "/merged/" 
             input_merge = "./pptx_folder/" + self.chat_id
-            self.emitter.emit_sync("Starting file merge operation", "in_progress", 
-                                 data={"input_folder": input_merge, "output_folder": output_merge})
             merge_result = merge_pptx(input_merge, output_merge)
             
             if "error" in merge_result:
-                self.emitter.emit_sync("Merge operation failed", "error", True, data={"error": merge_result["error"]})
                 response = f"Erreur lors de la fusion des fichiers: {merge_result['error']}"
             else:
                 # Get the merged file path from the result
                 merged_file = merge_result.get("merged_file")
                 if merged_file:
-                    self.emitter.emit_sync("Merge completed, uploading to OpenWebUI", "in_progress")
                     # Upload the merged file to OpenWebUI and get download URL
                     upload_result = self.download_file_openwebui(merged_file)
                     if "error" in upload_result:
-                        self.emitter.emit_sync("Upload failed after successful merge", "error", True, 
-                                             data={"error": upload_result["error"]})
                         response = f"Les fichiers ont été fusionnés avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
                     else:
-                        self.emitter.emit_sync("Merge and upload completed successfully", "completed", True)
                         response = f"Les fichiers ont été fusionnés avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
                 else:
-                    self.emitter.emit_sync("Merge completed but file path not found", "warning", True)
                     response = "Les fichiers ont été fusionnés avec succès, mais le chemin du fichier fusionné n'a pas été trouvé."
                 
                 # Save mappings after uploading the merged file
@@ -1626,205 +1452,269 @@ class Pipeline:
             return
 
         elif "/regroup" in message:
-            self.emitter.emit_sync("Processing regroup command", "in_progress")
             # First, get the structure of all files
             if self.cached_structure is None:
-                self.emitter.emit_sync("Analyzing structure for regrouping", "in_progress")
                 structure_result = self.analyze_slide_structure(self.chat_id)
                 if "error" in structure_result:
-                    self.emitter.emit_sync("Structure analysis failed for regrouping", "error", True, 
-                                         data={"error": structure_result["error"]})
                     response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
+                    yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                    self.last_response = response
+                    return
             else:
-                # Optimiser le prompt pour le petit modèle
-                structure_result = self.cached_structure
+                # Vérifier si cached_structure est la structure JSON brute ou du texte formaté
+                if isinstance(self.cached_structure, str):
+                    # C'est du texte formaté, on doit récupérer la structure brute
+                    structure_result = self.analyze_slide_structure(self.chat_id)
+                    if "error" in structure_result:
+                        response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
+                        yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                        yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                        self.last_response = response
+                        return
+                else:
+                    structure_result = self.cached_structure
+            
+            # Vérifier que structure_result est bien un dictionnaire
+            if not isinstance(structure_result, dict) or "projects" not in structure_result:
+                response = f"Erreur: structure de données invalide. Type: {type(structure_result)}"
+                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
+                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+                self.last_response = response
+                return
+            
+            
+            # Demander au LLM de identifier les projets avec des noms similaires
+            grouping_prompt = f"""Tu es un assistant qui analyse des noms de projets pour identifier ceux qui sont similaires ou liés.
+            
+            Voici les projets, concentres-toi sur les noms de projets seulement :
+            {structure_result["projects"].keys()}
+            
+            Ton travail est d'identifier les groupes de projets qui ont des noms similaires ou qui font partie du même projet principal.
+            
+            RÈGLES:
+            1. Regroupe les projets qui ont des noms similaires (ex: "NU" et "NU Gate" font partie du même groupe)
+            2. Regroupe les projets qui ont des parties communes (ex: "NU" et "NU_PDCA" font partie du même groupe)
+            3. Ignore les différences de casse et les caractères spéciaux
+            
+            RÉPONSE: Renvoie UNIQUEMENT une liste JSON de listes, où chaque sous-liste contient les noms des projets à regrouper ensemble.
+            Si un projet n'a pas de similaire, ne l'inclus pas dans la réponse.
+            
+            Exemple de format de réponse:
+            [
+                ["NU", "NU Gate"],
+                ["NU", "NU_PDCA"],
+                ["Projet1", "Projet1_Sub"]
+            ]
+            
+            RÉPONDS UNIQUEMENT AVEC LA LISTE JSON, SANS AUTRE TEXTE."""
+            
+            try:
+                # Obtenir la réponse du LLM
+                grouping_response = remove_tags_no_keep(self.small_model.invoke(grouping_prompt), '<think>', '</think>')
+                log.info(f"LLM grouping response: {grouping_response}")
                 
-                self.emitter.emit_sync("Using LLM to reorganize project data", "in_progress")
-                # Créer un prompt plus clair avec la structure exacte attendue
-                regroup_prompt = f"""Tu es un assistant spécialisé dans la réorganisation de données de projets. Tu vas regrouper les informations de projets similaires ou liés.
-
-TÂCHE:
-Analyser la structure de données ci-dessous et retourner une version réorganisée sous EXACTEMENT le même format.
-
-RÈGLES:
-1. Regrouper les projets similaires ou liés en un seul projet
-2. Ne pas modifier les informations des projets, seulement les regrouper
-3. Maintenir la hiérarchie de projets, sous-projets, etc.
-4. Conserver tous les événements à venir par service
-5. Éviter les duplications d'informations/alertes/événements
-6. IMPORTANT: Ton output DOIT contenir exactement la même structure que l'input, avec les mêmes clés au premier niveau ("projects", "upcoming_events", "metadata", "source_files")
-
-STRUCTURE ATTENDUE:
-{{
-  "projects": {{
-    "Nom_du_projet": {{
-      "information": "texte",
-      "critical": ["alerte 1", "alerte 2"],
-      "small": ["alerte mineure 1", "alerte mineure 2"],
-      "advancements": ["avancement 1", "avancement 2"]
-    }},
-    // ... autres projets
-  }},
-  "upcoming_events": {{
-    "Service1": ["événement 1", "événement 2"],
-    // ... autres services
-  }},
-  "metadata": {{ ... }},
-  "source_files": [ ... ]
-}}
-
-STRUCTURE À ANALYSER:
-{json.dumps(structure_result, indent=2, ensure_ascii=False)}
-
-RENVOIE UNIQUEMENT LE JSON RÉORGANISÉ AVEC LA STRUCTURE COMPLÈTE."""
-                
+                # Extraire les groupes de projets
                 try:
-                    # Utiliser le petit modèle avec un contexte réduit
-                    self.emitter.emit_sync("Getting reorganized data from LLM", "in_progress")
+                    groups_to_merge = extract_json(grouping_response)
+                    if not isinstance(groups_to_merge, list):
+                        log.warning("LLM response is not a list, trying to extract list from response")
+                        groups_to_merge = []
+                except:
+                    log.warning("Could not extract valid JSON from LLM response, no grouping will be performed")
+                    groups_to_merge = []
+                
+                log.info(f"Groups to merge: {groups_to_merge}")
+                
+                # Créer une copie de la structure pour modification
+                new_structure = json.loads(json.dumps(structure_result))
+                
+                # Traiter chaque groupe de projets à regrouper
+                for group in groups_to_merge:
+                    if not isinstance(group, list) or len(group) < 2:
+                        continue
                     
-                    # Check the size of the prompt to warn about potential issues
-                    prompt_size = len(regroup_prompt.encode('utf-8'))
-                    log.info(f"Regroup prompt size: {prompt_size} bytes")
-                    if prompt_size > 100000:  # 100KB threshold
-                        self.emitter.emit_sync("Large prompt detected, LLM may timeout", "warning", 
-                                             data={"prompt_size_bytes": prompt_size})
+                    # Créer un mapping entre noms originaux et noms nettoyés
+                    original_to_cleaned = {}
+                    cleaned_to_original = {}
+                    
+                    for original_name in group:
+                        cleaned_name = original_name.replace('\n', ' ').strip()
+                        original_to_cleaned[original_name] = cleaned_name
+                        cleaned_to_original[cleaned_name] = original_name
+                    
+                    cleaned_group = list(cleaned_to_original.keys())
+                    log.info(f"Original group: {group}, cleaned group: {cleaned_group}")
+                    
+                    # Identifier le projet principal (généralement le nom le plus court ou le plus générique)
+                    main_project_cleaned = min(cleaned_group, key=len)
+                    main_project_original = cleaned_to_original[main_project_cleaned]
+                    
+                    # Trouver les autres projets en utilisant les noms originaux
+                    other_projects_cleaned = [p for p in cleaned_group if p != main_project_cleaned]
+                    other_projects_original = [cleaned_to_original[p] for p in other_projects_cleaned 
+                                             if cleaned_to_original[p] in new_structure["projects"]]
+                    
+                    log.info(f"Regrouping: main={main_project_cleaned} (original: {main_project_original}), others={other_projects_cleaned}")
+                    log.info(f"Original project keys to process: main={main_project_original}, others={other_projects_original}")
+                    
+                    # Vérifier que le projet principal existe (en utilisant le nom original)
+                    if main_project_original not in new_structure["projects"]:
+                        log.warning(f"Main project '{main_project_original}' not found in structure, skipping group")
+                        log.info(f"Available projects: {list(new_structure['projects'].keys())}")
+                        continue
+                    
+                    # Regrouper les autres projets sous le projet principal
+                    for other_project_original in other_projects_original:
+                        if other_project_original in new_structure["projects"]:
+                            try:
+                                other_data = new_structure["projects"][other_project_original]
+                                other_project_cleaned = original_to_cleaned[other_project_original]
+                                
+                                # Déterminer le nom du sous-projet (enlever la partie commune)
+                                sub_name = other_project_cleaned.replace(main_project_cleaned, "").strip("_").strip()
+                                if not sub_name:
+                                    sub_name = other_project_cleaned
+                                
+                                # Vérifier si le projet principal est terminal ou a déjà des sous-projets
+                                if "information" in new_structure["projects"][main_project_original]:
+                                    # C'est un projet terminal, on doit le convertir en projet avec sous-projets
+                                    main_data = {
+                                        "information": new_structure["projects"][main_project_original].get("information", ""),
+                                        "critical": new_structure["projects"][main_project_original].get("critical", []),
+                                        "small": new_structure["projects"][main_project_original].get("small", []),
+                                        "advancements": new_structure["projects"][main_project_original].get("advancements", [])
+                                    }
+                                    
+                                    # Reconstruire le projet principal avec ses données comme sous-projet "Général"
+                                    new_structure["projects"][main_project_original] = {
+                                        "Général": main_data,
+                                        sub_name: other_data
+                                    }
+                                else:
+                                    # Le projet principal a déjà des sous-projets, on ajoute celui-ci
+                                    new_structure["projects"][main_project_original][sub_name] = other_data
+                                
+                                # Supprimer l'ancien projet (en utilisant le nom original)
+                                del new_structure["projects"][other_project_original]
+                                
+                                log.info(f"Moved {other_project_original} to {main_project_original}.{sub_name}")
+                            except Exception as e:
+                                log.error(f"Error moving project {other_project_original} to {main_project_original}: {str(e)}")
+                                continue
+                
+                # Mettre à jour le cache avec la nouvelle structure
+                self.cached_structure = new_structure
+                
+                # Créer directement la présentation en utilisant update_table_with_project_data
+                try:
+                    log.info("Starting PowerPoint generation process")
+                    try:
+                        from src.services.update_pttx_service import update_table_with_project_data
+                        log.info("Successfully imported update_table_with_project_data")
+                    except ImportError as ie:
+                        log.error(f"Failed to import update_table_with_project_data: {str(ie)}")
+                        raise ie
                     
                     try:
-                        regrouped_structure = remove_tags_no_keep(self.small_model.invoke(regroup_prompt), '<think>', '</think>')
-                        self.emitter.emit_sync("LLM response received successfully", "completed")
-                    except Exception as llm_error:
-                        log.error(f"LLM invocation failed: {str(llm_error)}")
-                        self.emitter.emit_sync("LLM request failed", "error", True, data={"error": str(llm_error)})
-                        
-                        # Fallback: return the original structure without regrouping
-                        response = f"Erreur lors de la réorganisation par l'IA: {str(llm_error)}. Les données sont conservées dans leur format original."
-                        yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                        yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                        self.last_response = response
-                        return
-                    
-                    # Log the raw response for debugging
-                    log.info(f"Raw model response: {regrouped_structure}")
-                    
-                    # Use extract_json to handle any formatting issues
-                    try:
-                        self.emitter.emit_sync("Parsing LLM response JSON", "in_progress")
-                        regrouped_data = extract_json(regrouped_structure)
-                        if not regrouped_data:
-                            raise ValueError("No valid JSON could be extracted from the model's response")
-                        
-                        # Vérifier et corriger la structure si nécessaire
-                        log.info(f"Extracted JSON structure keys: {regrouped_data.keys() if isinstance(regrouped_data, dict) else 'Not a dict'}")
-                        
-                        # Si le modèle n'a retourné que la partie "projects", recréer la structure complète
-                        if isinstance(regrouped_data, dict) and "projects" not in regrouped_data:
-                            # Vérifier si le modèle a directement retourné le contenu de "projects"
-                            # (il y aurait des sous-dictionnaires avec information, critical, small, advancements)
-                            has_project_structure = False
-                            for key, value in regrouped_data.items():
-                                if isinstance(value, dict) and any(k in value for k in ["information", "critical", "small", "advancements"]):
-                                    has_project_structure = True
-                                    break
-                            
-                            if has_project_structure:
-                                log.info("Modèle a retourné directement le contenu de 'projects', reconstruction de la structure complète")
-                                self.emitter.emit_sync("Reconstructing complete JSON structure", "in_progress")
-                                original_data = regrouped_data
-                                regrouped_data = {
-                                    "projects": original_data,
-                                    "upcoming_events": structure_result.get("upcoming_events", {}),
-                                    "metadata": structure_result.get("metadata", {}),
-                                    "source_files": structure_result.get("source_files", [])
-                                }
-                            else:
-                                log.error(f"Structure JSON invalide: {regrouped_data}")
-                                raise ValueError("Invalid JSON structure: missing required fields and not a project structure")
-                        
-                        # Vérification finale de la structure
-                        if not isinstance(regrouped_data, dict) or "projects" not in regrouped_data:
-                            log.error(f"Structure JSON invalide après correction: {regrouped_data}")
-                            raise ValueError("Invalid JSON structure: missing required fields after correction")
-                        
-                        self.emitter.emit_sync("JSON structure validated successfully", "completed")
-                        
-                    except Exception as json_error:
-                        log.error(f"JSON extraction/validation error: {str(json_error)}")
-                        self.emitter.emit_sync("JSON parsing failed", "error", True, data={"error": str(json_error)})
-                        log.error(f"Invalid content: {regrouped_structure}")
-                        response = f"Erreur lors de la réorganisation des données: impossible d'extraire un JSON valide. Détails: {str(json_error)}"
-                        yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                        yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                        self.last_response = response
-                        return
-                    
-                    # Créer directement la présentation en utilisant update_table_with_project_data
-                    self.emitter.emit_sync("Creating PowerPoint presentation", "in_progress")
-                    from src.services.update_pttx_service import update_table_with_project_data
-                    from pptx import Presentation
-                    from pptx.util import Pt
+                        from pptx import Presentation
+                        from pptx.util import Pt
+                        log.info("Successfully imported PowerPoint libraries")
+                    except ImportError as ie:
+                        log.error(f"Failed to import PowerPoint libraries: {str(ie)}")
+                        raise ie
                     
                     # Créer les dossiers nécessaires
                     output_regroup = os.path.join("OUTPUT", self.chat_id, "regrouped")
                     os.makedirs(output_regroup, exist_ok=True)
+                    log.info(f"Created output directory: {output_regroup}")
                     
                     # Nom du fichier de sortie avec timestamp
                     import datetime
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_file = os.path.join(output_regroup, f"regrouped_{timestamp}.pptx")
+                    log.info(f"Target output file: {output_file}")
                     
                     # Créer une présentation vide ou utiliser un template
                     template_path = os.path.join("templates", "CRA_TEMPLATE_IA.pptx")
-                    if os.path.exists(template_path):
-                        prs = Presentation(template_path)
-                    else:
-                        prs = Presentation()
-                        slide = prs.slides.add_slide(prs.slide_layouts[5])  # Blank layout
-                        table_shape = slide.shapes.add_table(rows=10, cols=3, left=Pt(30), top=Pt(30), width=Pt(600), height=Pt(400))
+                    try:
+                        if os.path.exists(template_path):
+                            log.info(f"Using template: {template_path}")
+                            prs = Presentation(template_path)
+                        else:
+                            log.info("Creating blank presentation")
+                            prs = Presentation()
+                            slide = prs.slides.add_slide(prs.slide_layouts[5])  # Blank layout
+                            table_shape = slide.shapes.add_table(rows=10, cols=3, left=Pt(30), top=Pt(30), width=Pt(600), height=Pt(400))
+                        log.info("Presentation created successfully")
+                    except Exception as pe:
+                        log.error(f"Error creating presentation: {str(pe)}")
+                        raise pe
                     
                     # Sauvegarder temporairement
                     temp_path = os.path.join(output_regroup, "temp.pptx")
-                    prs.save(temp_path)
+                    log.info(f"Saving temporary file: {temp_path}")
+                    try:
+                        prs.save(temp_path)
+                        log.info("Temporary file saved successfully")
+                    except Exception as se:
+                        log.error(f"Error saving temporary file: {str(se)}")
+                        raise se
                     
                     # Mettre à jour la présentation avec les données regroupées
+                    log.info("Updating presentation with regrouped data")
+                    log.info(f"Project data keys: {list(new_structure['projects'].keys())}")
+                    log.info(f"Upcoming events: {new_structure.get('upcoming_events', {})}")
+                    
                     try:
-                        self.emitter.emit_sync("Updating PowerPoint with regrouped data", "in_progress")
+                        log.info("CALLING update_table_with_project_data...")
                         # Utiliser le premier slide (index 0) et la première table (index 0)
                         updated_path = update_table_with_project_data(
                             temp_path, 
                             0, 
                             0, 
-                            regrouped_data["projects"],
+                            new_structure["projects"],
                             output_file,
-                            regrouped_data.get("upcoming_events", {})
+                            new_structure.get("upcoming_events", {})
                         )
-                        
-                        # Supprimer le fichier temporaire
+                        log.info(f"PowerPoint updated successfully: {updated_path}")
+                    except Exception as ue:
+                        log.error(f"Error updating PowerPoint with project data: {str(ue)}")
+                        log.exception("Update PowerPoint error details:")
+                        raise ue
+                    
+                    # Supprimer le fichier temporaire
+                    try:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
-                        
-                        self.emitter.emit_sync("PowerPoint created, uploading to OpenWebUI", "in_progress")
-                        # Upload to OpenWebUI and get download URL
+                            log.info("Temporary file cleaned up")
+                    except Exception as ce:
+                        log.error(f"Error cleaning up temporary file: {str(ce)}")
+                        # Ne pas interrompre pour un problème de nettoyage
+                    
+                    # Upload to OpenWebUI and get download URL
+                    log.info("Uploading file to OpenWebUI")
+                    try:
                         upload_result = self.download_file_openwebui(updated_path)
                         if "error" in upload_result:
-                            self.emitter.emit_sync("Upload failed after successful regrouping", "error", True, 
-                                                 data={"error": upload_result["error"]})
                             response = f"Les informations des projets ont été regroupées avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
                         else:
-                            self.emitter.emit_sync("Regrouping completed successfully", "completed", True)
-                            response = f"Les informations des projets ont été regroupées avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
+                            response = f"Les informations des projets ont été regroupées avec succès. {len(groups_to_merge)} groupe(s) de projets similaires ont été fusionnés.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
                             # Save mappings after uploading the new file
                             self.save_file_mappings()
-                    except Exception as pptx_error:
-                        log.error(f"Error during PowerPoint generation: {str(pptx_error)}")
-                        self.emitter.emit_sync("PowerPoint generation failed", "error", True, data={"error": str(pptx_error)})
-                        log.exception("PowerPoint generation error details:")
-                        response = f"Erreur lors de la génération de la présentation PowerPoint: {str(pptx_error)}"
-                    
+                            log.info("File uploaded and mappings saved successfully")
+                    except Exception as upe:
+                        log.error(f"Error uploading file to OpenWebUI: {str(upe)}")
+                        response = f"Les informations des projets ont été regroupées avec succès, mais une erreur s'est produite lors du téléchargement: {str(upe)}"
                 except Exception as e:
-                    log.error(f"Error during regrouping: {str(e)}")
-                    self.emitter.emit_sync("Regrouping process failed", "error", True, data={"error": str(e)})
-                    log.exception("Full error details:")
-                    response = f"Erreur lors de la réorganisation des données: {str(e)}"
+                    log.error(f"Error during PowerPoint generation: {str(e)}")
+                    log.exception("PowerPoint generation error details:")
+                    response = f"Erreur lors de la génération de la présentation PowerPoint: {str(e)}"
+            
+            except Exception as e:
+                log.error(f"Error during regrouping: {str(e)}")
+                log.exception("Full error details:")
+                response = f"Erreur lors de la réorganisation des données: {str(e)}"
             
             yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
             yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
@@ -1843,8 +1733,6 @@ RENVOIE UNIQUEMENT LE JSON RÉORGANISÉ AVEC LA STRUCTURE COMPLÈTE."""
 /generate --> Génère tout le pptx en fonction du texte ( /generate [Avancements de la semaine])
 /merge --> Fusionne tous les fichiers pptx envoyés
 /regroup --> Regroupe les informations des projets similaires ou liés
-
-NOTE: Le système a été amélioré pour éviter la duplication d'informations. Les alertes (en couleur) apparaissent maintenant uniquement dans leur section correspondante et ne sont plus répétées dans les informations générales.
             """
             self.last_response = commands
             yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"

@@ -21,9 +21,9 @@ def merge_pptx(folder_path: str, output_path: str):
         os.makedirs(output_path, exist_ok=True)
         
         proc = subprocess.run(
-            ['node', js_bundle, folder_path, output_path],
-            capture_output=True,
-            text=True
+                ['node', js_bundle, folder_path, output_path],
+                capture_output=True,
+                text=True
         )
 
         print('STDOUT:', proc.stdout)
