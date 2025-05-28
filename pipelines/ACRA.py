@@ -5,427 +5,235 @@ import shutil
 import requests
 import sqlite3
 import time
-from typing import List, Generator
-from langchain_ollama import  OllamaLLM
+import datetime
+from typing import List, Generator, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..","src")))
+
+# Add src to path for imports
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+
+# Import core functions
 from core import summarize_ppt, get_slide_structure, generate_pptx_from_text
 from services import merge_pptx
 
+# Import utilities
 from OLLibrary.utils.text_service import remove_tags_no_keep
 from OLLibrary.utils.log_service import setup_logging, get_logger
 from OLLibrary.utils.json_service import extract_json
 
-# Set up the main application logger
+# Import service classes and config
+from config_pipeline import acra_config
+from services.file_manager import FileManager
+from services.command_handler import CommandHandler
+from services.model_manager import model_manager
+
+# Set up logging
 setup_logging(app_name="ACRA_Pipeline")
-# Use a specific logger for this module
 log = get_logger(__name__)
-UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
-OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
-# Use absolute path for mappings folder
-MAPPINGS_FOLDER = os.path.abspath(os.getenv("MAPPINGS_FOLDER", os.path.join(os.getcwd(), "mappings")))
+
+UPLOAD_FOLDER = acra_config.upload_folder
+OUTPUT_FOLDER = acra_config.output_folder
+MAPPINGS_FOLDER = acra_config.mappings_folder
 
 class Pipeline:
     def __init__(self):
-        load_dotenv()
         log.info("Initializing ACRA Pipeline")
-        self.last_response = None
-
-        # Fix: Properly convert USE_API to boolean
-        use_api_env = os.getenv("USE_API", "False")
-        self.use_api = use_api_env.lower() in ("true", "1", "t", "yes", "y")
-        print(f"USE_API: {self.use_api}")
-        # self.model = OllamaLLM(model="deepseek-r1:8b", base_url="http://host.docker.internal:11434", num_ctx=32000)
-        self.streaming_model = OllamaLLM(model="qwen3:30b-a3b", base_url="http://host.docker.internal:11434", num_ctx=32000, stream=True)
-
-        self.api_url = "http://host.docker.internal:5050"
-
-        self.openwebui_api = "http://host.docker.internal:3030/api/v1/"
-        self.openwebui_db_path = os.getenv("OPENWEBUI_DB_PATH", "./open-webui/webui.db")
-
-        # Réduire le contexte pour le petit modèle et activer le streaming
-        self.small_model = OllamaLLM(model="qwen2.5:14b", base_url="http://host.docker.internal:11434", num_ctx=16000, stream=True)
-
-        self.file_path_list = []
-        self.openwebui_api_key = os.getenv("OPENWEBUI_API_KEY")
-        if not self.openwebui_api_key:
-            log.error("OPENWEBUI_API_KEY is not set")
-            raise ValueError("OPENWEBUI_API_KEY is not set")
-
-        self.chat_id = ""
-        self.current_chat_id = ""  # To track conversation changes
+        
+        # Initialize configuration and ensure directories exist
+        acra_config.ensure_directories()
+        
+        # State tracking - chat_id needs to be initialized before FileManager
+        self.chat_id = "" 
+        self.current_chat_id = ""
+        
+        # Initialize file manager
+        self.file_manager = FileManager(chat_id=self.chat_id)
+        
+        # Initialize command handler, passing the file_manager instance
+        self.command_handler = CommandHandler(file_manager=self.file_manager)
+        
         self.system_prompt = ""
         self.message_id = 0
+        self.file_path_list = []
+        self.last_response = None
         
-        # Variable pour stocker la structure traitée
         self.cached_structure = None
 
-        # State tracking
-        self.waiting_for_confirmation = False
-        self.confirmation_command = ""
-        self.confirmation_additional_info = ""
-        
-        # File ID mapping
-        self.file_id_mapping = {}  # Maps {file_path: file_id}
-        
-        # Create mappings folder if it doesn't exist
-        try:
-            global MAPPINGS_FOLDER
-            log.info(f"Creating mappings directory at {MAPPINGS_FOLDER}")
-            os.makedirs(MAPPINGS_FOLDER, exist_ok=True)
-            # Test if we can write to the directory
-            test_file_path = os.path.join(MAPPINGS_FOLDER, "test_write.txt")
-            with open(test_file_path, 'w') as f:
-                f.write("Test write access")
-            os.remove(test_file_path)
-            log.info(f"Mappings directory created and writable at {MAPPINGS_FOLDER}")
-        except Exception as e:
-            log.error(f"Error creating or accessing mappings directory: {str(e)}")
-            # Fallback to using OUTPUT_FOLDER for mappings
-            log.warning(f"Using OUTPUT_FOLDER for mappings as fallback")
-            MAPPINGS_FOLDER = os.path.abspath(OUTPUT_FOLDER)
+        # Validate required configuration (OPENWEBUI_API_KEY is checked by acra_config or FileManager if needed)
+        if not acra_config.get("OPENWEBUI_API_KEY"):
+            log.error("OPENWEBUI_API_KEY is not set in acra_config")
+            raise ValueError("OPENWEBUI_API_KEY is not set")
         
         log.info("ACRA Pipeline initialized successfully")
 
     def generate_report(self, foldername, info):
         """
-        Génère un rapport à partir du texte fourni en utilisant une requête POST.
-        Génère un nouveau fichier avec un timestamp unique à chaque appel.
+        Generate a report from provided text using API or direct function call.
+        Creates a new file with unique timestamp for each call.
         
         Args:
-            foldername (str): Le nom du dossier où stocker le rapport
-            info (str): Le texte à analyser pour générer le rapport
+            foldername (str): Folder name to store the report. Should align with chat_id.
+            info (str): Text to analyze for report generation
             
         Returns:
-            dict: Résultat de la requête avec l'URL de téléchargement
+            dict: Request result with download URL
         """
-        log.info(f"Generating report for folder: {foldername}")
-        log.info(f"use_api setting is: {self.use_api}")
+        log.info(f"Generating report for chat: {self.file_manager.chat_id}") # Use file_manager.chat_id
         
-        import datetime
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info(f"Creating report with timestamp: {timestamp}")
         
-        if self.use_api:
+        if acra_config.get("USE_API"): 
             log.info("Using API endpoint to generate report")
-            endpoint = f"generate_report/{foldername}?info={info}&timestamp={timestamp}"
-            result = self.fetch(endpoint)
+            # Ensure foldername here is self.file_manager.chat_id for consistency
+            endpoint = f"generate_report/{self.file_manager.chat_id}?info={info}&timestamp={timestamp}"
+            result = self._fetch_api(endpoint)
             if "error" in result:
                 return result
-                
-            return self.download_file_openwebui(result["summary"])
+            return self.file_manager.upload_to_openwebui(result["summary"])
 
         log.info("Using direct function call to generate report")
-        result = generate_pptx_from_text(foldername, info, timestamp)
+        # Ensure foldername passed to generate_pptx_from_text is self.file_manager.chat_id
+        result = generate_pptx_from_text(self.file_manager.chat_id, info, timestamp)
         if "error" in result:
             return result
             
-        upload_result = self.download_file_openwebui(result["summary"])
-        # Save the mapping after uploading the new file
-        self.save_file_mappings()
+        upload_result = self.file_manager.upload_to_openwebui(result["summary"])
+        self.file_manager.save_file_mappings()
         return upload_result
 
     def reset_conversation_state(self):
-        """Réinitialise les états spécifiques à une conversation"""
+        """Reset conversation-specific states"""
         log.info(f"Resetting conversation state for chat_id: {self.chat_id}")
-        self.last_response = None
+        self.command_handler.reset_state()
         self.system_prompt = ""
         self.file_path_list = []
         self.message_id = 0
-        self.waiting_for_confirmation = False
-        self.confirmation_command = ""
-        self.confirmation_additional_info = ""
-        self.cached_structure = None
-        # Note: We don't clear file_id_mapping here anymore
-        # as we want to preserve the mapping between files and OpenWebUI file IDs
-        # This mapping is loaded/saved per conversation ID
+
 
     def save_file_mappings(self):
-        """
-        Sauvegarde le mapping des fichiers dans un fichier JSON dans le dossier de mappings.
-        """
-        try:
-            os.makedirs(MAPPINGS_FOLDER, exist_ok=True)
-            # Log the mapping file path for debugging
-            mapping_file = os.path.join(MAPPINGS_FOLDER, f"{self.chat_id}_file_mappings.json")
-            log.info(f"Attempting to save file mappings to {mapping_file}")
-            
-            # Create directory structure if needed
-            os.makedirs(os.path.dirname(mapping_file), exist_ok=True)
-            
-            # Convert absolute paths to relative for better portability
-            relative_mappings = {}
-            for file_path, file_id in self.file_id_mapping.items():
-                relative_path = os.path.relpath(file_path, os.getcwd())
-                relative_mappings[relative_path] = file_id
-            
-            with open(mapping_file, 'w') as f:
-                json.dump(relative_mappings, f)
-            
-            log.info(f"Successfully saved file mappings to {mapping_file}")
-        except Exception as e:
-            log.error(f"Error saving file mappings: {str(e)}")
-            log.error(f"Current working directory: {os.getcwd()}")
-            log.error(f"Mappings directory: {MAPPINGS_FOLDER}")
-            log.error(f"Directory exists: {os.path.exists(MAPPINGS_FOLDER)}")
-            log.error(f"Directory is writable: {os.access(MAPPINGS_FOLDER, os.W_OK)}")
+        """Save file mappings (delegated to file manager)"""
+        self.file_manager.save_file_mappings()
 
-    def load_file_mappings(self):
-        """
-        Charge le mapping des fichiers depuis un fichier JSON dans le dossier de mappings.
-        """
-        try:
-            mapping_file = os.path.join(MAPPINGS_FOLDER, f"{self.chat_id}_file_mappings.json")
-            log.info(f"Attempting to load file mappings from {mapping_file}")
-            
-            if os.path.exists(mapping_file):
-                with open(mapping_file, 'r') as f:
-                    relative_mappings = json.load(f)
-                
-                # Convert relative paths back to absolute
-                self.file_id_mapping = {}
-                for relative_path, file_id in relative_mappings.items():
-                    abs_path = os.path.abspath(os.path.join(os.getcwd(), relative_path))
-                    self.file_id_mapping[abs_path] = file_id
-                
-                log.info(f"Loaded {len(self.file_id_mapping)} file mappings from {mapping_file}")
-            else:
-                log.info(f"No mapping file found at {mapping_file}")
-                # Try to look in OUTPUT_FOLDER as fallback for legacy mappings
-                legacy_mapping_file = os.path.join(OUTPUT_FOLDER, f"{self.chat_id}_file_mappings.json")
-                if os.path.exists(legacy_mapping_file):
-                    log.info(f"Found legacy mapping file at {legacy_mapping_file}")
-                    with open(legacy_mapping_file, 'r') as f:
-                        relative_mappings = json.load(f)
-                    
-                    # Convert relative paths back to absolute
-                    self.file_id_mapping = {}
-                    for relative_path, file_id in relative_mappings.items():
-                        abs_path = os.path.abspath(os.path.join(os.getcwd(), relative_path))
-                        self.file_id_mapping[abs_path] = file_id
-                    
-                    log.info(f"Loaded {len(self.file_id_mapping)} file mappings from legacy location")
-                    
-                    # Save to new location
-                    self.save_file_mappings()
-        except Exception as e:
-            log.error(f"Error loading file mappings: {str(e)}")
-            log.error(f"Current working directory: {os.getcwd()}")
-            log.error(f"Mappings directory: {MAPPINGS_FOLDER}")
-            log.error(f"Directory exists: {os.path.exists(MAPPINGS_FOLDER)}")
-            self.file_id_mapping = {}
+    def _fetch_api(self, endpoint):
+        """Perform synchronous GET request"""
+        url = f"{acra_config.get('API_URL')}/{endpoint}"
+        log.debug(f"Fetching from: {url}")
+        response = requests.get(url)
+        if response.status_code != 200:
+            log.error(f"API request failed: {response.status_code} - {response.text}")
+        return response.json() if response.status_code == 200 else {"error": "Request failed"}
 
-    def fetch(self, endpoint):
-            """Effectue une requête GET synchrone"""
-            url = f"{self.api_url}/{endpoint}"
-            log.debug(f"Fetching from: {url}")
-            response = requests.get(url)
-            if response.status_code != 200:
-                log.error(f"API request failed: {response.status_code} - {response.text}")
-            return response.json() if response.status_code == 200 else {"error": "Request failed"}
-
-    def post(self, endpoint, data=None, files=None, headers=None):
-        """Effectue une requête POST synchrone"""
-        # Si l'endpoint commence par http, on le considère comme une URL complète
-        print(f"Endpoint: {endpoint}")
+    def _post_api(self, endpoint, data=None, files=None, headers=None):
+        """Perform synchronous POST request"""
         if endpoint.startswith("http"):
             url = endpoint
         else:
-            # Sinon on le préfixe avec l'URL de l'API
-            url = f"{self.api_url}/{endpoint}"
+            url = f"{acra_config.get('API_URL')}/{endpoint}"
+        
         log.debug(f"Posting to: {url}")
         response = requests.post(url, data=data, files=files, headers=headers)
         if response.status_code != 200:
             log.error(f"API POST request failed: {response.status_code} - {response.text}")
         return response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
 
-    # Method to download a filde using the openwebui api. 
     def download_file_openwebui(self, file: str):
-        """
-        Télécharge un fichier à partir d'un nom de fichier.
-        Utilise un système de mapping pour éviter les téléchargements redondants.
-        """
-        try:
-            # Check if we already have this file mapped
-            file_path = os.path.abspath(file)
-            if file_path in self.file_id_mapping:
-                file_id = self.file_id_mapping[file_path]
-                log.info(f"File already uploaded, reusing ID: {file_id}")
-                download_url = f"http://localhost:3030/api/v1/files/{file_id}/content"
-                log.info(f"Reusing existing download URL: {download_url}")
-                return {"download_url": download_url}
-            
-            headers = {
-                "accept": "application/json",
-                # Remove Content-Type header to let requests set it automatically for multipart/form-data
-                "Authorization": f"Bearer {self.openwebui_api_key}"
-            }
-            url = f"{self.openwebui_api}files/"  # Remove trailing slash
-            log.info(f"Uploading file to OpenWebUI API: {url}")
-            log.info(f"File path: {file}")
-            
-            file_id = ""
-            try:
-                with open(file, "rb") as f:
-                    files = {"file": (os.path.basename(file), f, "application/octet-stream")}
-                    
-                    # Use direct requests instead of self.post for more control
-                    response = requests.post(url, headers=headers, files=files)
-                    log.info(f"Upload response status: {response.status_code}")
-                    
-                    if response.status_code != 200:
-                        log.error(f"File upload failed: {response.status_code} - {response.text}")
-                        return {"error": f"File upload failed: {response.status_code}"}
-                    
-                    # Parse the response
-                    response_data = response.json()
-                    log.info(f"Upload response: {response_data}")
-                    file_id = response_data.get("id", "")
-                    
-                    if not file_id:
-                        log.error("No file ID returned from upload")
-                        return {"error": "No file ID returned from upload"}
-                    
-                    # Store in our mapping
-                    self.file_id_mapping[file_path] = file_id
-                    log.info(f"Added file mapping: {file_path} -> {file_id}")
-            except Exception as e:
-                log.error(f"Error uploading file: {str(e)}")
-                return {"error": f"Error uploading file: {str(e)}"}
-            
-            download_url = f"http://localhost:3030/api/v1/files/{file_id}/content"
-            log.info(f"Download URL: {download_url}")
-            return {"download_url": download_url}
-        except Exception as e:
-            log.error(f"Error in download_file_openwebui: {str(e)}")
-            return {"error": f"Error in download_file_openwebui: {str(e)}"}
+        """Upload file to OpenWebUI and get download URL (delegated to file manager)"""
+        return self.file_manager.upload_to_openwebui(file)
     
     def summarize_folder(self, foldername=None, add_info=None):
         """
-        Envoie une demande pour résumer tous les fichiers PowerPoint dans un dossier.
-        Génère un nouveau fichier avec un timestamp unique à chaque appel.
+        Send request to summarize all PowerPoint files in a folder.
+        Generates a new file with unique timestamp for each call.
+        Delegates to CommandHandler._execute_summarize after confirmation logic (if any).
+        This method in Pipeline might just become a simple wrapper or be removed if CommandHandler handles it.
+        For now, let's assume CommandHandler's handle_summarize_command will call its _execute_summarize.
         
         Args:
-            foldername (str, optional): Le nom du dossier à résumer. Si None, utilise le chat_id.
-            add_info (str, optional): Informations supplémentaires à ajouter au résumé.
+            foldername (str, optional): Folder name to summarize. If None, uses chat_id.
+            add_info (str, optional): Additional information to add to summary.
         Returns:
-            dict: Les résultats de l'opération de résumé.
+            dict: Summary operation results.
         """
-        if foldername is None:
-            foldername = self.chat_id
-        
-        log.info(f"Summarizing folder: {foldername}")
-        log.info(f"use_api setting is: {self.use_api}")
-        log.info(f"Additional info: {add_info}")
-        
-        import datetime
+        current_chat_id = foldername if foldername else self.file_manager.chat_id
+        log.info(f"Request to summarize folder for chat: {current_chat_id}")
+
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log.info(f"Creating summary with timestamp: {timestamp}")
         
-        if self.use_api:
+        if acra_config.get("USE_API"):
             log.info("Using API endpoint to summarize folder")
-            endpoint = f"acra/{foldername}"
+            endpoint = f"acra/{current_chat_id}"
             if add_info:
                 endpoint += f"?add_info={add_info}&timestamp={timestamp}"
             else:
                 endpoint += f"?timestamp={timestamp}"
-            result = self.fetch(endpoint)
+            result = self._fetch_api(endpoint)
             if "error" in result:
                 return result
             
-            # Let's make sure both the output file and the source files are properly tracked
-            # First, track source files from the pptx_folder
-            source_folder = os.path.join(UPLOAD_FOLDER, foldername)
-            if os.path.exists(source_folder):
-                for filename in os.listdir(source_folder):
-                    if filename.lower().endswith(".pptx"):
-                        source_file_path = os.path.join(source_folder, filename)
-                        abs_file_path = os.path.abspath(source_file_path)
-                        if abs_file_path not in self.file_id_mapping:
-                            log.info(f"Adding source file to tracking: {abs_file_path}")
-                            # Will be uploaded and added to mapping when needed
-            
-            # Then get the download URL for the new summary file
-            upload_result = self.download_file_openwebui(result["summary"])
-            self.save_file_mappings()  # Save all mappings
+            self._track_source_files(current_chat_id)
+            upload_result = self.file_manager.upload_to_openwebui(result["summary"])
+            self.file_manager.save_file_mappings()
             return upload_result
         
         log.info("Using direct function call to summarize folder")
-        result = summarize_ppt(foldername, add_info, timestamp)
+        result = summarize_ppt(current_chat_id, add_info, timestamp) # summarize_ppt needs chat_id
         if "error" in result:
             return result
         
-        # Track both the output file and source files
-        upload_result = self.download_file_openwebui(result["summary"])
-        
-        # Track source files
-        source_folder = os.path.join(UPLOAD_FOLDER, foldername)
+        upload_result = self.file_manager.upload_to_openwebui(result["summary"])
+        self._track_source_files(current_chat_id)
+        self.file_manager.save_file_mappings()
+        return upload_result
+    
+    def _track_source_files(self, foldername): # foldername should be chat_id
+        """Track source files from the upload folder for the given chat_id"""
+        source_folder = acra_config.get_conversation_upload_folder(foldername) # foldername is chat_id
         if os.path.exists(source_folder):
             for filename in os.listdir(source_folder):
-                if filename.lower().endswith(".pptx"):
+                if filename.lower().endswith(".pptx"): # or use acra_config.get("ALLOWED_EXTENSIONS")
                     source_file_path = os.path.join(source_folder, filename)
                     abs_file_path = os.path.abspath(source_file_path)
-                    if abs_file_path not in self.file_id_mapping:
-                        log.info(f"Source file not yet tracked: {abs_file_path}")
-                        # Will be uploaded and tracked when needed
-        
-        # Save the mapping after uploading all files
-        self.save_file_mappings()
-        return upload_result
+                    # Check against file_manager's mapping
+                    if abs_file_path not in self.file_manager.file_id_mapping:
+                        log.info(f"Source file not yet tracked by FileManager: {abs_file_path}")
+                        # Optionally, trigger an upload/mapping via file_manager here if needed
+                        # self.file_manager.upload_to_openwebui(abs_file_path)
 
     def extract_service_name(self, filename):
         """
-        Extrait le nom du service à partir du nom du fichier PowerPoint en utilisant le modèle small_model.
-        
-        Args:
-            filename (str): Le nom du fichier PowerPoint
-            
-        Returns:
-            str: Le nom du service extrait
+        Extract service name from PowerPoint filename using the model_manager.
         """
-        prompt = f"Tu es un assistant spécialisé dans le traitement automatique des noms de fichiers. On te donne un nom de fichier de présentation (PowerPoint) contenant un identifiant unique suivi du titre du document. Ton objectif est d'extraire uniquement le titre du document dans un format propre et lisible pour un humain. Le titre est toujours situé après le dernier underscore (`_`) ou après une chaîne d'identifiants. Supprime l'extension `.pptx` ou toute autre extension. Remplace les underscores (`_`) ou tirets (`-`) par des espaces, et capitalise correctement chaque mot. Exemple : **Nom de fichier :** `dc56be63-37a6-4ed6-9223-50f545028ab4_CRA_SERVICE_UX.pptx`   **Titre extrait :** `Service UX` Donne uniquement le titre extrait (pas d'explication), en une seule ligne. voici le nom du fichier : {filename}"
-        
-        service_name = remove_tags_no_keep(self.small_model.invoke(prompt), '<think>', '</think>')
-        # Nettoyer la réponse (enlever les espaces, retours à la ligne, etc.)
-        return service_name.strip()
+        # Delegate to model_manager
+        return model_manager.extract_service_name(filename)
 
-    def analyze_slide_structure(self, foldername=None):
+    def analyze_slide_structure(self, foldername=None): # foldername should be chat_id
         """
-        Analyse la structure des diapositives dans un dossier.
-        
-        Args:
-            foldername (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
-        
-        Returns:
-            dict: Les résultats de l'analyse.
+        Analyze slide structure in a folder.
         """
-        if foldername is None:
-            foldername = self.chat_id
+        # foldername logic should align with self.file_manager.chat_id
+        current_chat_id = foldername if foldername else self.file_manager.chat_id
         
-        # Ensure foldername is not None after fallback to self.chat_id
-        if foldername is None:
-            raise Exception("Le nom du dossier et le chat_id sont tous deux None. Impossible d'analyser la structure des diapositives.")
+        if not current_chat_id: # Check if chat_id is actually set
+            log.error("Chat ID is not set. Cannot analyze slide structure.")
+            # Consider raising an exception or returning an error dict
+            raise ValueError("Chat ID is not set. Cannot analyze slide structure.")
         
-        log.info(f"Analyzing slide structure for folder: {foldername}")
-        log.info(f"use_api setting is: {self.use_api}")
+        log.info(f"Analyzing slide structure for chat: {current_chat_id}")
         
-        if self.use_api:
+        if acra_config.get("USE_API"):
             log.info("Using API endpoint to get slide structure")
-            return self.fetch(f"get_slide_structure/{foldername}")
+            return self._fetch_api(f"get_slide_structure/{current_chat_id}")
         
         log.info("Using direct function call to get slide structure")
-        return get_slide_structure(foldername)
+        return get_slide_structure(current_chat_id) # get_slide_structure needs chat_id
     
     def format_all_slide_data(self, data: dict) -> str:
         """
-        Formate les données de plusieurs présentations PPTX en une seule chaîne de texte structurée,
-        regroupant tous les projets sans séparation par fichier et avec les événements à venir par service.
-
-        Args:
-            data (dict): Dictionnaire contenant les projets et métadonnées conforme au nouveau format.
-
-        Returns:
-            str: Une chaîne de texte structurée listant les informations de tous les projets.
+        Formats slide data. This is also present in CommandHandler.
+        Consider consolidating or ensuring CommandHandler uses this if it's preferred here.
+        For now, keeping implementation here as it was, but flag for review.
         """
         # Si data est None ou vide, renvoyer un message d'erreur
         if not data:
@@ -517,296 +325,193 @@ class Pipeline:
 
         return result.strip()
 
+    def delete_all_files(self, foldername=None): # foldername should be chat_id
+        """
+        Deletes all files for a given chat_id.
+        Manages local file deletion and OpenWebUI file deletion.
+        Uses FileManager for some operations.
+        """
+        current_chat_id = foldername if foldername else self.file_manager.chat_id
+        log.info(f"Deleting all files for chat: {current_chat_id}")
 
-    def delete_all_files(self, foldername=None):
-        """
-        Supprime tous les fichiers dans un dossier et met à jour le système de mapping de fichiers.
-        Supprime également les fichiers correspondants dans OpenWebUI.
+        pptx_folder_path = acra_config.get_conversation_upload_folder(current_chat_id)
+        output_folder_path = acra_config.get_conversation_output_folder(current_chat_id)
         
-        Args:
-            foldername (str, optional): Le nom du dossier à vider. Si None, utilise le chat_id.
+        deleted_local_files = 0
         
-        Returns:
-            dict: Les résultats de l'opération de suppression.
-        """
-        if foldername is None:
-            foldername = self.chat_id
-        
-        log.info(f"Deleting all files for folder: {foldername}")
-        
-        # Get folder paths for both pptx_folder and OUTPUT
-        pptx_folder_path = os.path.join(UPLOAD_FOLDER, foldername)
-        output_folder_path = os.path.join(OUTPUT_FOLDER, foldername)
-        
-        deleted_count = 0
-        removed_mappings = 0
-        deleted_webui_files = 0
-        
-        # 1. D'abord, supprimer les fichiers dans OpenWebUI
-        log.info(f"Suppression des fichiers OpenWebUI pour le chat: {foldername}")
-        webui_result = self.delete_openwebui_files_for_chat(foldername)
+        # 1. Delete OpenWebUI files associated with this chat
+        webui_result = self.delete_openwebui_files_for_chat(current_chat_id) 
         deleted_webui_files = webui_result.get("deleted_count", 0)
-        log.info(f"Résultat de la suppression OpenWebUI: {webui_result}")
+        log.info(f"OpenWebUI deletion result: {webui_result}")
         
-        # Delete files from pptx_folder
-        if self.use_api:
-            log.info(f"Using API to delete files from {pptx_folder_path}")
-            url = f"{self.api_url}/delete_all_pptx_files/{foldername}"
-            response = requests.delete(url)
-            result = response.json() if response.status_code == 200 else {"error": f"Request failed with status {response.status_code}: {response.text}"}
-        else:
-            log.info(f"Directly deleting files from {pptx_folder_path}")
+        # 2. Delete local files from pptx_folder (upload folder)
+        if os.path.exists(pptx_folder_path):
+            for item in os.listdir(pptx_folder_path):
+                item_path = os.path.join(pptx_folder_path, item)
+                if os.path.isfile(item_path):
+                    try:
+                        os.remove(item_path)
+                        deleted_local_files += 1
+                        log.info(f"Deleted local file: {item_path}")
+                    except Exception as e:
+                        log.error(f"Error deleting local file {item_path}: {e}")
+            # Optionally remove the folder itself if empty, or let cleanup handle it
+            # shutil.rmtree(pptx_folder_path, ignore_errors=True) 
+        
+        # 3. Delete local files from OUTPUT folder
+        if os.path.exists(output_folder_path):
+            for item in os.listdir(output_folder_path):
+                item_path = os.path.join(output_folder_path, item)
+                if os.path.isfile(item_path) and item.endswith(".pptx"): # Only PPTX, leave mappings
+                    try:
+                        os.remove(item_path)
+                        deleted_local_files += 1
+                        log.info(f"Deleted local output file: {item_path}")
+                    except Exception as e:
+                        log.error(f"Error deleting local output file {item_path}: {e}")
+            # Optionally remove the folder itself
+            # shutil.rmtree(output_folder_path, ignore_errors=True)
+
+        # 4. Clear and delete mapping file for this conversation via FileManager
+        self.file_manager.file_id_mapping.clear() # Clear current instance's map
+        mapping_file_path = acra_config.get_mapping_file_path(current_chat_id)
+        if os.path.exists(mapping_file_path):
             try:
-                if os.path.exists(pptx_folder_path):
-                    files = os.listdir(pptx_folder_path)
-                    for file in files:
-                        file_path = os.path.join(pptx_folder_path, file)
-                        abs_path = os.path.abspath(file_path)
-                        
-                        # Remove mapping if exists
-                        if abs_path in self.file_id_mapping:
-                            del self.file_id_mapping[abs_path]
-                            removed_mappings += 1
-                            log.info(f"Removed mapping for deleted file: {abs_path}")
-                        
-                        # Delete the file
-                        os.remove(file_path)
-                        deleted_count += 1
-                        log.info(f"Deleted file: {file_path}")
-                        
-                    log.info(f"Deleted {deleted_count} files from pptx_folder")
-                    result = {"message": f"{deleted_count} fichiers supprimés avec succès."}
-                else:
-                    result = {"message": "Le dossier n'existe pas."}
+                os.remove(mapping_file_path)
+                log.info(f"Deleted mapping file: {mapping_file_path}")
             except Exception as e:
-                log.error(f"Error deleting files from pptx_folder: {str(e)}")
-                result = {"error": f"Erreur lors de la suppression des fichiers: {str(e)}"}
+                    log.error(f"Error deleting mapping file {mapping_file_path}: {e}")
         
-        # Also clean up any files in the OUTPUT folder for this conversation
-        try:
-            if os.path.exists(output_folder_path):
-                output_files = os.listdir(output_folder_path)
-                output_deleted = 0
-                
-                for file in output_files:
-                    if file.endswith(".pptx"):  # Only delete PPTX files, leave mapping files
-                        file_path = os.path.join(output_folder_path, file)
-                        abs_path = os.path.abspath(file_path)
-                        
-                        # Remove mapping if exists
-                        if abs_path in self.file_id_mapping:
-                            del self.file_id_mapping[abs_path]
-                            removed_mappings += 1
-                            log.info(f"Removed mapping for deleted output file: {abs_path}")
-                        
-                        # Delete the file
-                        os.remove(file_path)
-                        output_deleted += 1
-                        log.info(f"Deleted output file: {file_path}")
-                
-                log.info(f"Deleted {output_deleted} files from OUTPUT folder")
-                
-                # Update the result message
-                if "message" in result:
-                    result["message"] += f" Plus {output_deleted} fichiers supprimés du dossier de sortie."
-        except Exception as e:
-            log.error(f"Error cleaning up OUTPUT folder: {str(e)}")
-            # Don't override the main result if there was an error here
-        
-        # Also clean up any mapping files for this conversation
-        try:
-            mapping_file = os.path.join(MAPPINGS_FOLDER, f"{foldername}_file_mappings.json")
-            if os.path.exists(mapping_file):
-                os.remove(mapping_file)
-                log.info(f"Deleted mapping file: {mapping_file}")
-                result["message"] += f" Fichier de mapping supprimé."
-        except Exception as e:
-            log.error(f"Error deleting mapping file: {str(e)}")
-        
-        # Save the updated mappings (empty for this conversation)
-        if removed_mappings > 0:
-            log.info(f"Removed {removed_mappings} file mappings. Saving updated mappings.")
-            self.file_id_mapping = {}  # Clear all mappings for this conversation
-            self.save_file_mappings()
-        
-        # Reset file path list and cached structure
+        # Reset pipeline state associated with files
         self.file_path_list = []
-        self.cached_structure = None
-        
-        # Add information about deleted OpenWebUI files
-        if "message" in result:
-            result["message"] += f" {deleted_webui_files} fichiers supprimés d'OpenWebUI."
-        result["deleted_webui_files"] = deleted_webui_files
-        
-        return result
-    
-    def get_files_in_folder(self, foldername=None):
+        self.command_handler.cached_structure = None # Or self.cached_structure if still used by Pipeline
+
+        message = f"{deleted_local_files} fichiers locaux supprimés. {deleted_webui_files} fichiers supprimés d'OpenWebUI."
+        return {"message": message, "deleted_local_files": deleted_local_files, "deleted_webui_files": deleted_webui_files}
+
+    def get_files_in_folder(self, foldername=None): # foldername should be chat_id
         """
-        Récupère la liste des fichiers dans un dossier.
-        
-        Args:
-            foldername (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
-        
-        Returns:
-            list: Liste des noms de fichiers PPTX dans le dossier.
+        Retrieves list of PPTX files in the upload folder for the given chat_id.
         """
-        if foldername is None:
-            foldername = self.chat_id
-            
-        folder_path = os.path.join("./pptx_folder", foldername)
-        if not os.path.exists(folder_path):
-            return []
-            
-        return [f for f in os.listdir(folder_path) if f.lower().endswith(".pptx")]
+        current_chat_id = foldername if foldername else self.file_manager.chat_id
+        return self.file_manager.get_conversation_files(file_extensions=[".pptx"])
 
     def get_active_conversation_ids(self):
         """
-        Récupère tous les IDs de conversation actifs depuis la base de données OpenWebUI.
-        
-        Returns:
-            list: Liste des IDs de conversation actifs.
+        Retrieves active conversation IDs from OpenWebUI database.
+        This method relies on direct DB access and specific table/column names.
+        It's a critical part of cleanup.
+        Uses acra_config for DB path.
         """
         conversation_ids = []
+        db_path = acra_config.get("OPENWEBUI_DB_PATH")
+        log.info(f"Attempting to access OpenWebUI database at: {db_path}")
+
         try:
-            # Verify database path and log details
-            log.info(f"Attempting to access OpenWebUI database at: {self.openwebui_db_path}")
-            
-            if not os.path.exists(self.openwebui_db_path):
-                log.error(f"OpenWebUI database not found at {self.openwebui_db_path}")
-                # Try alternative paths
-                alt_paths = [
-                    "./webui.db",
-                    "/app/webui.db",
-                    "/app/open-webui/webui.db"
-                ]
-                for path in alt_paths:
-                    if os.path.exists(path):
-                        log.info(f"Found database at alternative path: {path}")
-                        self.openwebui_db_path = path
+            if not os.path.exists(db_path):
+                log.error(f"OpenWebUI database not found at {db_path}")
+                alt_paths = ["./webui.db", "/app/webui.db", "/app/open-webui/webui.db"]
+                for path_attempt in alt_paths:
+                    abs_path_attempt = os.path.abspath(path_attempt)
+                    log.info(f"Attempting alternative DB path: {abs_path_attempt}")
+                    if os.path.exists(abs_path_attempt):
+                        log.info(f"Found database at alternative path: {abs_path_attempt}")
+                        db_path = abs_path_attempt
                         break
                 else:
                     log.error("Could not find OpenWebUI database in any expected location")
-                    # Sécurité: Retourner tous les chats existants dans les dossiers pour éviter les suppressions accidentelles
-                    return self.get_all_existing_chat_folders()
+                    return self.get_all_existing_chat_folders() # Fallback
             
-            log.info(f"Connecting to SQLite database at: {self.openwebui_db_path}")
-            conn = sqlite3.connect(self.openwebui_db_path)
+            log.info(f"Connecting to SQLite database at: {db_path}")
+            conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             
-            # First check if the conversations table exists
-            cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='chat'
-            """)
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chat'")
             if not cursor.fetchone():
                 log.error("Table 'chat' not found in database")
                 conn.close()
-                # Sécurité: Retourner tous les chats existants dans les dossiers pour éviter les suppressions accidentelles
                 return self.get_all_existing_chat_folders()
             
-            # Query to get all active conversation IDs
-            # Vérifier d'abord si la colonne deleted_at existe
             cursor.execute("PRAGMA table_info(chat)")
             columns = [col[1] for col in cursor.fetchall()]
             
             if "deleted_at" in columns:
                 log.info("Using deleted_at column to filter active chats")
-                cursor.execute("""
-                    SELECT id FROM chat 
-                    WHERE deleted_at IS NULL 
-                    OR deleted_at = ''
-                """)
+                cursor.execute("SELECT id FROM chat WHERE deleted_at IS NULL OR deleted_at = ''")
             else:
                 log.info("deleted_at column not found, getting all chat IDs")
                 cursor.execute("SELECT id FROM chat")
                 
             rows = cursor.fetchall()
-            
-            base_conversation_ids = [row[0] for row in rows]
+            base_conversation_ids = [str(row[0]) for row in rows] # Ensure string IDs
             log.info(f"Found {len(base_conversation_ids)} conversations in database: {base_conversation_ids}")
             
-            # Vérifier également si les chats ont des messages associés (si la table existe)
+            # Check messages table (original logic kept)
             try:
-                cursor.execute("""
-                    SELECT name FROM sqlite_master 
-                    WHERE type='table' AND name='chat'
-                """)
-                if cursor.fetchone():
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='message'") # Corrected table name
+                if cursor.fetchone(): # Check if 'message' table exists
                     log.info("Checking messages table for active chats")
-                    cursor.execute("""
-                        SELECT DISTINCT id FROM chat
-                    """)
-                    message_chat_ids = [row[0] for row in cursor.fetchall()]
+                    # Query for chat_ids that have messages
+                    cursor.execute("SELECT DISTINCT chat_id FROM message WHERE chat_id IS NOT NULL")
+                    message_chat_ids_rows = cursor.fetchall()
+                    message_chat_ids = [str(row[0]) for row in message_chat_ids_rows if row[0]] # Ensure string and not None
+                    
                     log.info(f"Found {len(message_chat_ids)} chats with messages: {message_chat_ids}")
                     
-                    # Ajouter les chats qui ont des messages même s'ils ne sont pas dans la liste principale
-                    for chat_id in message_chat_ids:
-                        if chat_id not in base_conversation_ids:
-                            base_conversation_ids.append(chat_id)
-                            log.info(f"Added chat with messages that was not in main list: {chat_id}")
+                    for chat_id_from_msg in message_chat_ids:
+                        if chat_id_from_msg not in base_conversation_ids:
+                            base_conversation_ids.append(chat_id_from_msg)
+                            log.info(f"Added chat with messages that was not in main list: {chat_id_from_msg}")
             except Exception as e:
                 log.error(f"Error checking messages table: {str(e)}")
             
             conn.close()
-            
-            # Convertir les UUID en strings si nécessaire
-            conversation_ids = [str(id) for id in base_conversation_ids]
+            conversation_ids = list(set(base_conversation_ids)) # Ensure unique
             log.info(f"Final active conversations: {conversation_ids}")
+
         except Exception as e:
             log.error(f"Error retrieving conversation IDs from database: {str(e)}")
             log.exception("Database access exception details:")
-            # Sécurité: Retourner tous les chats existants dans les dossiers pour éviter les suppressions accidentelles
             return self.get_all_existing_chat_folders()
         
-        # Si nous n'avons trouvé aucun chat actif, considérer tous les dossiers existants comme actifs par sécurité
         if not conversation_ids:
             log.warning("No active conversations found in database! Using existing folders as fallback.")
             conversation_ids = self.get_all_existing_chat_folders()
         
-        # Toujours inclure le chat actuel
-        if self.chat_id and self.chat_id not in conversation_ids:
-            log.warning(f"Current chat_id {self.chat_id} not found in active list! Adding it.")
-            conversation_ids.append(self.chat_id)
+        current_pipeline_chat_id = self.file_manager.chat_id # Use FileManager's chat_id
+        if current_pipeline_chat_id and current_pipeline_chat_id not in conversation_ids:
+            log.warning(f"Current chat_id {current_pipeline_chat_id} not found in active list! Adding it.")
+            conversation_ids.append(current_pipeline_chat_id)
         
-        return conversation_ids
+        return list(set(conversation_ids)) # Ensure unique again after adding current
     
     def get_all_existing_chat_folders(self):
         """
-        Récupère les IDs de tous les dossiers de chat existants dans UPLOAD_FOLDER et OUTPUT_FOLDER.
-        Utilisé comme fallback de sécurité en cas d'échec de la détection des chats actifs.
-        
-        Returns:
-            list: Liste des IDs de dossiers de chat existants
+        Fallback: Gets IDs of all existing chat folders from UPLOAD, OUTPUT, MAPPINGS.
+        Uses acra_config for paths.
         """
         folder_ids = set()
+        upload_dir = acra_config.upload_folder
+        output_dir = acra_config.output_folder
+        mappings_dir = acra_config.mappings_folder
         
-        # Récupérer tous les dossiers dans UPLOAD_FOLDER
-        if os.path.exists(UPLOAD_FOLDER):
-            try:
-                for folder_name in os.listdir(UPLOAD_FOLDER):
-                    if os.path.isdir(os.path.join(UPLOAD_FOLDER, folder_name)):
-                        folder_ids.add(folder_name)
-            except Exception as e:
-                log.error(f"Error listing UPLOAD_FOLDER: {str(e)}")
+        for base_dir in [upload_dir, output_dir]:
+            if os.path.exists(base_dir):
+                try:
+                    for folder_name in os.listdir(base_dir):
+                        if os.path.isdir(os.path.join(base_dir, folder_name)):
+                            folder_ids.add(folder_name)
+                except Exception as e:
+                    log.error(f"Error listing {base_dir}: {str(e)}")
         
-        # Récupérer tous les dossiers dans OUTPUT_FOLDER
-        if os.path.exists(OUTPUT_FOLDER):
+        if os.path.exists(mappings_dir):
             try:
-                for folder_name in os.listdir(OUTPUT_FOLDER):
-                    if os.path.isdir(os.path.join(OUTPUT_FOLDER, folder_name)):
-                        folder_ids.add(folder_name)
-            except Exception as e:
-                log.error(f"Error listing OUTPUT_FOLDER: {str(e)}")
-        
-        # Récupérer tous les fichiers de mapping
-        if os.path.exists(MAPPINGS_FOLDER):
-            try:
-                for filename in os.listdir(MAPPINGS_FOLDER):
+                for filename in os.listdir(mappings_dir):
                     if filename.endswith("_file_mappings.json"):
                         chat_id = filename.split("_file_mappings.json")[0]
                         folder_ids.add(chat_id)
             except Exception as e:
-                log.error(f"Error listing MAPPINGS_FOLDER: {str(e)}")
+                log.error(f"Error listing {mappings_dir}: {str(e)}")
         
         folder_list = list(folder_ids)
         log.info(f"Found {len(folder_list)} existing chat folders as safety fallback: {folder_list}")
@@ -814,1413 +519,627 @@ class Pipeline:
 
     def cleanup_orphaned_conversations(self):
         """
-        Nettoie les dossiers et fichiers de conversations qui n'existent plus dans OpenWebUI.
-        Appelé quand le chat_id change pour s'assurer que les ressources sont bien gérées.
-        
-        Returns:
-            dict: Résultats de l'opération de nettoyage
+        Cleans orphaned conversation folders and files.
+        Relies on get_active_conversation_ids.
+        Uses acra_config for paths.
         """
         log.info("Starting cleanup of orphaned conversations")
         active_conversations = self.get_active_conversation_ids()
-        
-        # Log all active conversations for debugging
-        log.info(f"Active conversations: {active_conversations}")
-        
-        if not active_conversations:
-            log.warning("No active conversations found or unable to get conversation list")
-            return {"status": "warning", "message": "Could not retrieve active conversations - No cleanup performed for safety", "action": "none"}
-        
-        # Mesure de sécurité supplémentaire - Si on a moins de 2 conversations actives, on ne nettoie rien
-        # car cela pourrait indiquer une erreur dans la détection des chats actifs
-        if len(active_conversations) < 2:
-            log.warning(f"Only {len(active_conversations)} active conversation(s) found. Skipping cleanup for safety.")
+        log.info(f"Active conversations from DB/fallback: {active_conversations}")
+
+        if not active_conversations: # Should be handled by get_active_conversation_ids returning fallback
+            log.warning("No active conversations determined. Skipping cleanup for safety.")
+            return {"status": "warning", "message": "No active conversations - No cleanup performed for safety", "action": "none"}
+
+        # Safety: If very few active conversations, could be DB error.
+        if len(active_conversations) < 2 and self.file_manager.chat_id not in active_conversations:
+             # If the only "active" is not even the current one, it's risky.
+            log.warning(f"Only {len(active_conversations)} active_conversations. Current chat '{self.file_manager.chat_id}' is not in it. Skipping cleanup.")
             return {
                 "status": "warning", 
-                "message": f"Only {len(active_conversations)} active conversation(s) found. Skipping cleanup for safety.", 
+                "message": f"Only {len(active_conversations)} active conversation(s) found, current chat not among them. Skipping cleanup for safety.", 
                 "action": "none"
             }
         
-        # Make sure current chat_id is considered active
-        if self.chat_id and self.chat_id not in active_conversations:
-            log.info(f"Adding current chat_id to active list: {self.chat_id}")
-            active_conversations.append(self.chat_id)
+        # Ensure current chat_id (from file_manager) is always preserved
+        current_fm_chat_id = self.file_manager.chat_id
+        if current_fm_chat_id and current_fm_chat_id not in active_conversations:
+            log.info(f"Adding current FileManager chat_id to active list for preservation: {current_fm_chat_id}")
+            active_conversations.append(current_fm_chat_id)
+            active_conversations = list(set(active_conversations)) # Ensure unique
         
-        deleted_folders = 0
-        deleted_files = 0
-        deleted_mappings = 0
+        deleted_folders_count = 0
+        deleted_files_count = 0 # Local files in those folders
+        deleted_mapping_files = 0
         
-        # Get list of all folders in UPLOAD_FOLDER and OUTPUT_FOLDER
-        upload_folders = []
-        output_folders = []
-        
-        try:
-            if os.path.exists(UPLOAD_FOLDER):
-                upload_folders = [d for d in os.listdir(UPLOAD_FOLDER) 
-                                if os.path.isdir(os.path.join(UPLOAD_FOLDER, d))]
-                log.info(f"Found {len(upload_folders)} folders in UPLOAD_FOLDER: {upload_folders}")
-            
-            if os.path.exists(OUTPUT_FOLDER):
-                output_folders = [d for d in os.listdir(OUTPUT_FOLDER) 
-                               if os.path.isdir(os.path.join(OUTPUT_FOLDER, d))]
-                log.info(f"Found {len(output_folders)} folders in OUTPUT_FOLDER: {output_folders}")
-        except Exception as e:
-            log.error(f"Error listing folders: {str(e)}")
-        
-        # Vérifier si tous les dossiers sont considérés comme actifs
-        # Si c'est le cas, cela pourrait indiquer un problème avec la détection des chats actifs
-        folders_to_delete = [f for f in upload_folders if f not in active_conversations]
-        if len(folders_to_delete) == 0 and len(upload_folders) > 0:
-            log.warning("All upload folders are considered active - this might indicate an issue. Skipping cleanup for safety.")
-            return {
-                "status": "warning", 
-                "message": "All folders are considered active. Skipping cleanup for safety.", 
-                "active_conversations": active_conversations,
-                "upload_folders": upload_folders,
-                "action": "none"
-            }
-        
-        # Clean pptx_folder
-        try:
-            if os.path.exists(UPLOAD_FOLDER):
-                log.info(f"Checking for orphaned folders in {UPLOAD_FOLDER}")
-                for folder_name in upload_folders:
-                    if folder_name not in active_conversations:
-                        folder_path = os.path.join(UPLOAD_FOLDER, folder_name)
-                        log.info(f"Deleting orphaned PPTX folder: {folder_path}")
-                        try:
-                            # Count files before deletion
-                            file_count = len([f for f in os.listdir(folder_path) 
-                                          if os.path.isfile(os.path.join(folder_path, f))])
-                            deleted_files += file_count
-                            log.info(f"Deleting {file_count} files from {folder_path}")
+        upload_dir = acra_config.upload_folder
+        output_dir = acra_config.output_folder
+        mappings_dir = acra_config.mappings_folder
+
+        # Iterate over folders in UPLOAD_FOLDER, OUTPUT_FOLDER, MAPPINGS_FOLDER
+        for base_folder_path, type_of_folder in [
+            (upload_dir, "upload"), 
+            (output_dir, "output"),
+            (mappings_dir, "mappings_file") # Special handling for mapping files
+        ]:
+            if not os.path.exists(base_folder_path):
+                log.info(f"{type_of_folder} directory not found at {base_folder_path}, skipping.")
+                continue
+
+            log.info(f"Checking for orphaned items in {base_folder_path} ({type_of_folder})")
+            for item_name in os.listdir(base_folder_path):
+                item_path = os.path.join(base_folder_path, item_name)
+                chat_id_candidate = None
+
+                if type_of_folder == "mappings_file":
+                    if item_name.endswith("_file_mappings.json") and os.path.isfile(item_path):
+                        chat_id_candidate = item_name.split("_file_mappings.json")[0]
+                    else:
+                        continue # Not a mapping file we manage
+                elif os.path.isdir(item_path): # For upload and output folders
+                    chat_id_candidate = item_name
+                else: # Not a directory in upload/output
+                    continue 
+                
+                if chat_id_candidate and chat_id_candidate not in active_conversations:
+                    log.info(f"Orphaned item found: {item_path} (chat_id: {chat_id_candidate})")
+                    try:
+                        if type_of_folder == "mappings_file":
+                            os.remove(item_path)
+                            deleted_mapping_files += 1
+                            log.info(f"Deleted orphaned mapping file: {item_path}")
+                        else: # It's an upload or output directory
+                            # Count files before deleting directory
+                            num_files_in_dir = 0
+                            for root, _, files_in_subdir in os.walk(item_path):
+                                num_files_in_dir += len(files_in_subdir)
                             
-                            # Try to forcefully remove the directory
-                            shutil.rmtree(folder_path, ignore_errors=True)
-                            deleted_folders += 1
-                            log.info(f"Successfully deleted folder: {folder_path}")
-                        except Exception as e:
-                            log.error(f"Failed to delete folder {folder_path}: {str(e)}")
-        except Exception as e:
-            log.error(f"Error cleaning up pptx folders: {str(e)}")
-        
-        # Clean OUTPUT folder
-        try:
-            if os.path.exists(OUTPUT_FOLDER):
-                log.info(f"Checking for orphaned folders in {OUTPUT_FOLDER}")
-                for folder_name in output_folders:
-                    if folder_name not in active_conversations:
-                        folder_path = os.path.join(OUTPUT_FOLDER, folder_name)
-                        log.info(f"Deleting orphaned OUTPUT folder: {folder_path}")
-                        try:
-                            # Count files before deletion
-                            file_count = len([f for f in os.listdir(folder_path) 
-                                          if os.path.isfile(os.path.join(folder_path, f))])
-                            deleted_files += file_count
-                            log.info(f"Deleting {file_count} files from {folder_path}")
-                            
-                            # Try to forcefully remove the directory
-                            shutil.rmtree(folder_path, ignore_errors=True)
-                            deleted_folders += 1
-                            log.info(f"Successfully deleted folder: {folder_path}")
-                        except Exception as e:
-                            log.error(f"Failed to delete folder {folder_path}: {str(e)}")
-        except Exception as e:
-            log.error(f"Error cleaning up output folders: {str(e)}")
-        
-        # Clean mappings folder
-        try:
-            if os.path.exists(MAPPINGS_FOLDER):
-                log.info(f"Checking for orphaned mapping files in {MAPPINGS_FOLDER}")
-                for filename in os.listdir(MAPPINGS_FOLDER):
-                    if filename.endswith("_file_mappings.json"):
-                        # Extract chat_id from filename (chat_id_file_mappings.json)
-                        chat_id = filename.split("_file_mappings.json")[0]
-                        if chat_id not in active_conversations:
-                            mapping_path = os.path.join(MAPPINGS_FOLDER, filename)
-                            log.info(f"Deleting orphaned mapping file: {mapping_path}")
-                            try:
-                                os.remove(mapping_path)
-                                deleted_mappings += 1
-                                log.info(f"Successfully deleted mapping file: {mapping_path}")
-                            except Exception as e:
-                                log.error(f"Failed to delete mapping file {mapping_path}: {str(e)}")
-        except Exception as e:
-            log.error(f"Error cleaning up mapping files: {str(e)}")
+                            shutil.rmtree(item_path, ignore_errors=True)
+                            deleted_folders_count += 1
+                            deleted_files_count += num_files_in_dir
+                            log.info(f"Deleted orphaned folder: {item_path} (contained {num_files_in_dir} files)")
+                    except Exception as e:
+                        log.error(f"Failed to delete orphaned item {item_path}: {e}")
         
         result = {
             "status": "success",
-            "deleted_folders": deleted_folders,
-            "deleted_files": deleted_files,
-            "deleted_mappings": deleted_mappings,
-            "active_conversations": len(active_conversations),
-            "upload_folders": upload_folders,
-            "output_folders": output_folders,
-            "action": "cleanup"
+            "deleted_folders": deleted_folders_count,
+            "deleted_files_in_folders": deleted_files_count,
+            "deleted_mapping_files": deleted_mapping_files,
+            "active_conversations_checked": len(active_conversations),
+            "action": "cleanup_orphaned_conversations"
         }
-        
-        log.info(f"Cleanup results: {result}")
+        log.info(f"Orphaned conversation cleanup results: {result}")
         return result
 
     async def inlet(self, body: dict, user: dict) -> dict:
         log.info(f"Received body: {body}")
-        log.info(f"Metadata: {body.get('metadata', {})}")
+        metadata = body.get("metadata", {})
+        log.info(f"Metadata: {metadata}")
         
-        # Debug log the current state
-        log.info(f"Current state - self.chat_id: '{self.chat_id}', self.current_chat_id: '{self.current_chat_id}'")
+        current_fm_chat_id = self.file_manager.chat_id
+        log.info(f"Current state - Pipeline.chat_id: '{self.chat_id}', FileManager.chat_id: '{current_fm_chat_id}'")
         
-        # Get conversation ID from body
-        new_chat_id = None
-        if "metadata" in body and "chat_id" in body["metadata"]:
-            new_chat_id = body["metadata"]["chat_id"]
-            log.info(f"New chat_id extracted from request metadata: '{new_chat_id}'")
+        new_chat_id_from_request = metadata.get("chat_id")
+        
+        if new_chat_id_from_request:
+            log.info(f"Chat_id from request metadata: '{new_chat_id_from_request}'")
             
-            # Check if this is actually a change
-            is_change = new_chat_id != self.chat_id
-            has_previous = bool(self.chat_id)
-            
-            log.info(f"Chat ID change detection: is_change={is_change}, has_previous={has_previous}")
-            
-            # If chat_id changed, we need to save current mappings and load new ones
-            if is_change and has_previous:
-                log.info(f"*** CHAT ID CHANGED *** from '{self.chat_id}' to '{new_chat_id}'")
+            if new_chat_id_from_request != current_fm_chat_id:
+                log.info(f"*** CHAT ID CHANGING *** from FileManager current '{current_fm_chat_id}' to new '{new_chat_id_from_request}'")
                 
-                # Save current mappings before changing IDs
-                self.save_file_mappings()  # Save mappings for old chat
-                old_chat_id = self.chat_id
+                # FileManager's set_chat_id handles saving old mappings and loading new ones.
+                self.file_manager.set_chat_id(new_chat_id_from_request)
                 
-                # Update chat_id first to ensure cleanup knows the current one is active
-                self.chat_id = new_chat_id
+                # Update Pipeline's chat_id as well, though FileManager is the primary owner now.
+                self.chat_id = new_chat_id_from_request 
                 
-                # Get active chats for cleanup
-                active_chats = self.get_active_conversation_ids()
-                log.info(f"Active chats for cleanup: {active_chats}")
+                # Reset pipeline states specific to a conversation
+                self.reset_conversation_state() # This now delegates to command_handler.reset_state()
                 
-                # Directly delete old folders if they're not in active chats
-                if old_chat_id not in active_chats and old_chat_id != new_chat_id:
-                    log.info(f"Directly cleaning up old chat ID folders: {old_chat_id}")
-                    
-                    # Supprimer d'abord les fichiers OpenWebUI
-                    log.info(f"Suppression des fichiers OpenWebUI pour le chat: {old_chat_id}")
-                    webui_result = self.delete_openwebui_files_for_chat(old_chat_id)
-                    log.info(f"Résultat de la suppression OpenWebUI: {webui_result}")
-                    
-                    # Delete UPLOAD_FOLDER for old chat
-                    old_upload_folder = os.path.join(UPLOAD_FOLDER, old_chat_id)
-                    if os.path.exists(old_upload_folder) and os.path.isdir(old_upload_folder):
-                        log.info(f"Deleting old upload folder: {old_upload_folder}")
-                        try:
-                            shutil.rmtree(old_upload_folder)
-                            log.info(f"Successfully deleted: {old_upload_folder}")
-                        except Exception as e:
-                            log.error(f"Error deleting {old_upload_folder}: {str(e)}")
-                    
-                    # Delete OUTPUT_FOLDER for old chat
-                    old_output_folder = os.path.join(OUTPUT_FOLDER, old_chat_id)
-                    if os.path.exists(old_output_folder) and os.path.isdir(old_output_folder):
-                        log.info(f"Deleting old output folder: {old_output_folder}")
-                        try:
-                            shutil.rmtree(old_output_folder)
-                            log.info(f"Successfully deleted: {old_output_folder}")
-                        except Exception as e:
-                            log.error(f"Error deleting {old_output_folder}: {str(e)}")
-                    
-                    # Delete mapping file for old chat
-                    old_mapping_file = os.path.join(MAPPINGS_FOLDER, f"{old_chat_id}_file_mappings.json")
-                    if os.path.exists(old_mapping_file):
-                        log.info(f"Deleting old mapping file: {old_mapping_file}")
-                        try:
-                            os.remove(old_mapping_file)
-                            log.info(f"Successfully deleted: {old_mapping_file}")
-                        except Exception as e:
-                            log.error(f"Error deleting {old_mapping_file}: {str(e)}")
-                
-                # Run the general cleanup as well
-                log.info(f"Running general cleanup for chat ID change")
-                try:
-                    cleanup_result = self.cleanup_orphaned_conversations()
-                    log.info(f"Cleanup results: {cleanup_result}")
-                    
-                    # Force cleanup as a fallback with only current chat ID preserved
-                    log.info(f"Performing forced cleanup to ensure old folders are removed")
-                    force_result = self.force_cleanup_old_folders([new_chat_id])
-                    log.info(f"Force cleanup results: {force_result}")
-                except Exception as e:
-                    log.error(f"Cleanup process failed: {str(e)}")
-                    log.exception("Cleanup exception details:")
-                
-                # Reset state but preserve file mappings
-                self.reset_conversation_state()
-                
-                # Load mappings for new conversation
-                self.load_file_mappings()
-            elif not self.chat_id and new_chat_id:
-                # First time setting chat_id
-                log.info(f"Setting initial chat_id to {new_chat_id}")
-                self.chat_id = new_chat_id
-                self.load_file_mappings()  # Try to load any existing mappings
-                
-            if not self.current_chat_id and new_chat_id:
-                self.current_chat_id = new_chat_id
+                # Trigger cleanup of orphaned conversations (now that active chats might have changed)
+                # Consider if this should be done before or after setting new chat_id.
+                # Doing it after ensures the new chat_id is preserved.
+                self._cleanup_old_chat(old_chat_id=current_fm_chat_id, new_chat_id=new_chat_id_from_request)
+
+            elif not current_fm_chat_id: # First time FileManager gets a chat_id
+                log.info(f"Setting initial FileManager chat_id to {new_chat_id_from_request}")
+                self.file_manager.set_chat_id(new_chat_id_from_request)
+                self.chat_id = new_chat_id_from_request # Keep Pipeline's chat_id in sync
         else:
-            log.warning("No chat_id found in metadata!")
+            log.warning("No chat_id found in request metadata!")
 
-        # Create folders for the conversation
-        # Create pptx_folder for source files
-        conversation_folder = os.path.join(UPLOAD_FOLDER, self.chat_id)
-        os.makedirs(conversation_folder, exist_ok=True)
-        log.info(f"Created/verified upload folder at: {conversation_folder}")
-        
-        # Create output folder for generated files
-        output_folder = os.path.join(OUTPUT_FOLDER, self.chat_id) 
-        os.makedirs(output_folder, exist_ok=True)
-        log.info(f"Created/verified output folder at: {output_folder}")
-        
-        # Create mappings folder if needed
-        os.makedirs(MAPPINGS_FOLDER, exist_ok=True)
-
-        # Extract files from body['metadata']['files']
-        files = body.get("metadata", {}).get("files", [])
-        if files:
-            # Réinitialiser la structure en cache car de nouveaux fichiers ont été ajoutés
-            self.cached_structure = None
+        files_metadata = metadata.get("files", [])
+        if files_metadata:
+            self.command_handler.cached_structure = None # Reset cache in CommandHandler
             
-            # Traiter les fichiers
-            for file_entry in files:
+            for file_entry in files_metadata:
                 file_data = file_entry.get("file", {})
                 filename = file_data.get("filename", "N/A")
-                file_id = file_data.get("id", "N/A")
+                openwebui_file_id = file_data.get("id", "N/A") # This is OpenWebUI's internal file ID
 
-                filecomplete_name = file_id + "_" + filename
-
-                source_path = os.path.join("./uploads", filecomplete_name)
-                # Update destination to use conversation foldername
-                destination_path = os.path.join(conversation_folder, filecomplete_name)
+                openwebui_uploads_dir = acra_config.get("OPENWEBUI_UPLOADS", "open-webui/uploads") # From acra_config
+                source_path_in_openwebui_volume = os.path.join(openwebui_uploads_dir, f"{openwebui_file_id}_{filename}")
                 
-                self.file_path_list.append(destination_path)
-                shutil.copy(source_path, destination_path)
+                if not os.path.exists(source_path_in_openwebui_volume):
+                    log.error(f"Source file from OpenWebUI not found at: {source_path_in_openwebui_volume}")
+                    # Try an alternative common path if the primary one fails
+                    alt_source_path = os.path.join("uploads", f"{openwebui_file_id}_{filename}") # Relative to CWD
+                    if os.path.exists(alt_source_path):
+                        source_path_in_openwebui_volume = alt_source_path
+                        log.info(f"Found source file at alternative path: {alt_source_path}")
+                    else:
+                        log.error(f"Also not found at alternative: {alt_source_path}. Skipping file.")
+                        continue
+                copied_file_path = self.file_manager.copy_uploaded_file(
+                    source_path=source_path_in_openwebui_volume, 
+                    filename=f"{openwebui_file_id}_{filename}"
+                )
                 
-                # Add to file mappings if not already present
-                abs_path = os.path.abspath(destination_path)
-                if abs_path not in self.file_id_mapping:
-                    self.file_id_mapping[abs_path] = file_id
-                    log.info(f"Added mapping for uploaded file: {abs_path} -> {file_id}")
+                abs_copied_path = os.path.abspath(copied_file_path)
+                if abs_copied_path not in self.file_manager.file_id_mapping:
+                    self.file_manager.file_id_mapping[abs_copied_path] = openwebui_file_id
+                    log.info(f"Manually added mapping for copied file: {abs_copied_path} -> {openwebui_file_id}")
                 
-                # Extraire et afficher le nom du service pour information
-                service_name = self.extract_service_name(filename)
-                log.info(f"File {filename} identified as service: {service_name}")
+                service_name = model_manager.extract_service_name(filename) # Use model_manager
+                log.info(f"File {filename} (OpenWebUI ID: {openwebui_file_id}) identified as service: {service_name}")
                 
-            # Analyser la structure
-            response = self.analyze_slide_structure(self.chat_id)
-            if "error" in response:
-                response = f"Erreur lors de l'analyse de la structure: {response['error']}"
-            else:
-                # Sauvegarder la structure JSON brute dans le cache
-                self.cached_structure = response
-                # Formater la réponse pour l'affichage
-                response = self.format_all_slide_data(response)
-                
-            self.system_prompt = "# Voici les informations des fichiers PPTX toutes les informations sont importantes pour la compréhension du message de l'utilisateur et les données sont triées : \n\n" +  response + "# voici le message de l'utilisateur : " 
+            # Analyze structure using current chat_id from file_manager
+            structure_response_data = self.analyze_slide_structure(self.file_manager.chat_id) 
             
-            # Save file mappings after processing new files
-            self.save_file_mappings()
+            if isinstance(structure_response_data, dict) and "error" in structure_response_data:
+                display_response = f"Erreur lors de l'analyse de la structure: {structure_response_data['error']}"
+                self.command_handler.cached_structure = {"error": display_response} # Cache error state
+            elif isinstance(structure_response_data, dict):
+                self.command_handler.cached_structure = structure_response_data # Cache in CommandHandler
+                display_response = self.format_all_slide_data(structure_response_data) # Format for system prompt
+            else: # Should not happen if analyze_slide_structure is consistent
+                display_response = "Erreur: Type de réponse inattendu de l'analyse de structure."
+                self.command_handler.cached_structure = {"error": display_response}
+
+            self.system_prompt = f"# Voici les informations des fichiers PPTX toutes les informations sont importantes pour la compréhension du message de l\'utilisateur et les données sont triées : \n\n{display_response}\n\n# voici le message de l\'utilisateur : "
+            
+            self.file_manager.save_file_mappings() # Save any new manual mappings
         
         return body
-
-    def get_existing_summaries(self, folder_name=None):
+    
+    def _cleanup_old_chat(self, old_chat_id: Optional[str], new_chat_id: str):
         """
-        Récupère la liste des fichiers de résumé existants pour le chat_id actuel et les télécharge vers OpenWebUI.
-        Cherche les fichiers dans les dossiers OUTPUT et pptx_folder.
-        
-        Args:
-            folder_name (str, optional): Le nom du dossier à analyser. Si None, utilise le chat_id.
-        
-        Returns:
-            list: Liste des tuples (filename, url) des résumés.
+        Handle cleanup of old chat folders and files when chat ID changes.
+        This version is simplified, relying on cleanup_orphaned_conversations for robustness.
         """
-        if folder_name is None:
-            folder_name = self.chat_id
-        log.info(f"Getting existing summaries for folder: {folder_name}")
-        
-        summaries = []
-        
-        # Check in the OUTPUT folder first (traditional location for summaries)
-        output_path = os.path.join(OUTPUT_FOLDER, folder_name)
-        log.info(f"Checking output path: {output_path}")
-        
-        # Ensure OUTPUT directory exists
-        os.makedirs(output_path, exist_ok=True)
-        
-        # Also check in pptx_folder (new location for reports)
-        pptx_path = os.path.join(UPLOAD_FOLDER, folder_name)
-        log.info(f"Checking pptx folder path: {pptx_path}")
-        
-        # Ensure pptx directory exists
-        os.makedirs(pptx_path, exist_ok=True)
-        
-        try:
-            # Check for PPTX files in OUTPUT directory
-            if os.path.exists(output_path):
-                files = os.listdir(output_path)
-                log.info(f"Files in output folder: {files}")
-                
-                for filename in files:
-                    if filename.endswith(".pptx"):
-                        log.info(f"Found summary file in OUTPUT: {filename}")
-                        file_path = os.path.join(output_path, filename)
-                        
-                        # Upload file to OpenWebUI to get a download URL
-                        upload_result = self.download_file_openwebui(file_path)
-                        
-                        if "error" in upload_result:
-                            log.error(f"Error uploading file to OpenWebUI: {upload_result['error']}")
-                            continue
-                        
-                        download_url = upload_result.get("download_url", "")
-                        if download_url:
-                            log.info(f"Generated OpenWebUI URL: {download_url}")
-                            summaries.append(("OUTPUT/" + filename, download_url))
-                        else:
-                            log.error(f"No download URL received for file: {filename}")
-            
-            # Check for PPTX files in pptx_folder directory
-            if os.path.exists(pptx_path):
-                files = os.listdir(pptx_path)
-                log.info(f"Files in pptx folder: {files}")
-                
-                for filename in files:
-                    if filename.endswith(".pptx") and ("_summary_" in filename or "_text_summary_" in filename):
-                        log.info(f"Found summary/report file in pptx_folder: {filename}")
-                        file_path = os.path.join(pptx_path, filename)
-                        
-                        # Upload file to OpenWebUI to get a download URL
-                        upload_result = self.download_file_openwebui(file_path)
-                        
-                        if "error" in upload_result:
-                            log.error(f"Error uploading file to OpenWebUI: {upload_result['error']}")
-                            continue
-                        
-                        download_url = upload_result.get("download_url", "")
-                        if download_url:
-                            log.info(f"Generated OpenWebUI URL: {download_url}")
-                            summaries.append(("pptx_folder/" + filename, download_url))
-                        else:
-                            log.error(f"No download URL received for file: {filename}")
-            
-            # Save any new mappings we've created
-            if len(summaries) > 0:
-                self.save_file_mappings()
-                
-            log.info(f"Final summaries list: {summaries}")
-        except Exception as e:
-            log.error(f"Error listing summary files: {str(e)}")
-            log.error(f"Current working directory: {os.getcwd()}")
-        
-        return summaries
-
-    def pipe(self, body: dict, user_message: str, model_id: str, messages: List[dict]) -> Generator[str, None, None]:
-        """
-        Gère le pipeline de traitement des messages et des commandes spécifiques.
-
-        Cette méthode traite différentes commandes comme /summarize, /structure, et /clear, 
-        et gère le streaming de réponses du modèle.
-
-        Args:
-            body (dict): Le corps de la requête contenant des métadonnées.
-            user_message (str): Le message de l'utilisateur.
-            model_id (str): L'identifiant du modèle utilisé.
-            messages (List[dict]): Liste des messages précédents.
-
-        Yields:
-            str: Réponses formatées en Server-Sent Events (SSE) compatibles avec OpenWebUI.
-
-        Commandes supportées:
-        - /summarize: Tente de résumer les fichiers PPTX
-        - /structure: Analyse la structure des diapositives
-        - /clear: Supprime tous les fichiers de la conversation
-        """
-        message = user_message.lower()  # Convertir en minuscules pour simplifier la correspondance
-        __event_emitter__ = body.get("__event_emitter__")
-
-        # Check if we're waiting for confirmation
-        if self.waiting_for_confirmation:
-            if message in ["yes", "y", "oui", "o"]:
-                self.waiting_for_confirmation = False
-                
-                # If we were waiting for summarize confirmation
-                if self.confirmation_command == "summarize":
-                    # Generate a new summary
-                    log.info(f"Generating summary with additional info: {self.confirmation_additional_info}")
-                    response = self.summarize_folder(add_info=self.confirmation_additional_info)
-                    if "error" in response:
-                        response = f"Erreur lors de la génération du résumé: {response['error']}"
-                    else:
-                        response = f"Le résumé de tous les fichiers a été généré avec succès. URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
-                    
-                    # Save mappings after generating a new summary
-                    self.save_file_mappings()
-                    
-                    yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                    self.last_response = response
-                    return
-            
-            elif message in ["no", "n", "non"]:
-                self.waiting_for_confirmation = False
-                response = "Génération de résumé annulée."
-                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = response
-                return
-            
-            # Reset if we get any other input
-            self.waiting_for_confirmation = False
-        
-        # Gestion des commandes spécifiques
-        if "/summarize" in message:
-            # Extract additional information after the /summarize command
-            additional_info = None
-            if " " in message:
-                command_parts = message.split(" ", 1)
-                if len(command_parts) > 1 and command_parts[1].strip():
-                    additional_info = command_parts[1].strip()
-            
-            # Get existing summaries
-            existing_summaries = self.get_existing_summaries()
-            log.info(f"ACRA - Pipeline: Existing summaries: {existing_summaries}")
-            
-            if existing_summaries:
-                response = "Voici les résumés existants pour cette conversation:\n\n"
-                for filename, url in existing_summaries:
-                    response += f"- {filename}: {url}\n"
-                
-                response += "\nVoulez-vous générer un nouveau résumé? (Oui/Non)"
-                
-                # Set state to wait for confirmation
-                self.waiting_for_confirmation = True
-                self.confirmation_command = "summarize"
-                self.confirmation_additional_info = additional_info
-                
-                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = response
-                return
-            else:
-                # No existing summaries, generate one directly
-                response = self.summarize_folder(add_info=additional_info)
-                if "error" in response:
-                    response = {"error": f"Erreur lors de la génération du résumé: {response['error']}"}
-                else:
-                    introduction_prompt = f"""Tu es un assistant qui va générer une introduction pour un enssemble de fichiers PPTX je veux juste une description globale des fichiers impliqués dans le message de 
-                l'utilisateur pas de cas par cas et sourtout quelque chose de consit et renvoie uniquement l'introduction (pas d'explication) si tu vois une information importante ou une alerte critique, tu dois 
-                la signaler dans l'introduction. Voici le contenu de tous les fichiers : {self.system_prompt} Tu dois renvoyer uniquement l'introduction (pas d'explication).
-                """
-                    introduction = self.small_model.invoke(introduction_prompt if "introduction_prompt" in locals() else self.system_prompt)
-                    response = f"{introduction}\n\n Le résumé de tous les fichiers a été généré avec succès.\n\n  ### URL de téléchargement: \n{response.get('download_url', 'Non disponible')}"
-                    
-                    # Save mappings after generating a new summary
-                    self.save_file_mappings()
-                
-                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = response
-                return
-        
-        elif "/structure" in message:
-            if self.cached_structure is None:
-                # Récupérer la structure des diapositives
-                response = self.analyze_slide_structure(self.chat_id)
-                
-                if "error" in response:
-                    response_text = f"Erreur lors de l'analyse de la structure: {response['error']}"
-                    if __event_emitter__:
-                        __event_emitter__({"type": "content", "content": response_text})
-                    yield f"data: {json.dumps({'choices': [{'message': {'content': response_text}}]})}\n\n"
-                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                    self.last_response = response_text
-                    return
-                
-                # Sauvegarder la structure JSON brute dans le cache
-                self.cached_structure = response
-                # Formater les données de la structure pour l'affichage
-                formatted_response = self.format_all_slide_data(response)
-                if __event_emitter__:
-                    __event_emitter__({"type": "content", "content": formatted_response})
-                yield f"data: {json.dumps({'choices': [{'message': {'content': formatted_response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = formatted_response
-                return
-            else:
-                # Utiliser la structure en cache pour formater l'affichage
-                if isinstance(self.cached_structure, dict):
-                    formatted_response = self.format_all_slide_data(self.cached_structure)
-                else:
-                    formatted_response = self.cached_structure
-                if __event_emitter__:
-                    __event_emitter__({"type": "content", "content": formatted_response})
-                yield f"data: {json.dumps({'choices': [{'message': {'content': formatted_response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = formatted_response
-                return
-        elif "/generate" in message:
-            # Extraire le texte après la commande
-            text_content = user_message.replace("/generate", "").strip()
-            if not text_content:
-                response = "Veuillez fournir du texte après la commande /generate pour générer un rapport."
-            else:
-                # On utilise la méthode generate_report qui maintenant fait un POST avec le texte dans le body
-                response = self.generate_report(self.chat_id, text_content)
-                if "error" in response:
-                    response = f"Erreur lors de la génération du rapport: {response['error']}"
-                else:
-                    response = f"Le rapport a été généré avec succès à partir du texte fourni.\n\n### URL de téléchargement:\n{response.get('download_url', 'Non disponible')}"
-                    # Save mappings after generating a new report
-                    self.save_file_mappings()
-            
-            if __event_emitter__:
-                __event_emitter__({"type": "content", "content": response})
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
+        if not old_chat_id or old_chat_id == new_chat_id:
+            log.info(f"No old chat to clean up, or old is same as new ({old_chat_id} -> {new_chat_id}).")
+            # Still run general orphan cleanup, as other chats might be orphaned.
+            cleanup_result = self.cleanup_orphaned_conversations()
+            log.info(f"General orphaned conversation cleanup result: {cleanup_result}")
             return
+            
+        log.info(f"Specific cleanup for old chat ID: {old_chat_id} (new is {new_chat_id})")
         
-        elif "/clear" in message:
-            log.info("Processing /clear command (using force cleanup method)")
-            try:
-                # Preserve current chat ID
-                preserve_ids = [self.chat_id] if self.chat_id else []
-                
-                # Extract additional IDs to preserve if specified
-                if " " in message:
-                    additional_ids = message.split(" ", 1)[1].strip().split()
-                    if additional_ids:
-                        log.info(f"Additional IDs to preserve: {additional_ids}")
-                        preserve_ids.extend(additional_ids)
-                
-                # Run the standard cleanup
-                log.info("Running standard cleanup")
-                cleanup_result = self.cleanup_orphaned_conversations()
-                
-                # Run the forced cleanup, préservant le chat actuel et les IDs supplémentaires
-                log.info(f"Running forced cleanup via /clear command, preserving: {preserve_ids}")
-                force_result = self.force_cleanup_old_folders(preserve_ids)
-                
-                # Reset important state variables
-                self.file_path_list = []
-                self.cached_structure = None
-                self.file_id_mapping = {}  # Clear all mappings for this conversation
-                
-                response = f"Nettoyage terminé!\n\nProtégés: {preserve_ids}\nSupprimés: {force_result['deleted_folders']} dossiers, {force_result['deleted_files']} fichiers locaux, {force_result['deleted_webui_files']} fichiers OpenWebUI"
-                log.info(f"Clear command completed successfully. Response: {response}")
-            except Exception as e:
-                log.error(f"Error processing /clear command: {str(e)}")
-                log.exception("Clear command exception details:")
-                response = f"Une erreur s'est produite lors du nettoyage: {str(e)}"
-                
-            if __event_emitter__:
-                __event_emitter__({"type": "content", "content": response})
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
-            return
+        # Get active chats. The new_chat_id should be among them.
+        # cleanup_orphaned_conversations will use this list to decide what's truly orphaned.
+        active_chats = self.get_active_conversation_ids() 
+        log.info(f"Active chats for cleanup context: {active_chats}")
 
-        elif "/merge" in message:
-            output_merge = "./OUTPUT/"+self.chat_id + "/merged/" 
-            input_merge = "./pptx_folder/" + self.chat_id
-            merge_result = merge_pptx(input_merge, output_merge)
+        if old_chat_id not in active_chats:
+            log.info(f"Old chat ID {old_chat_id} is not in the active list. It's a candidate for deletion by general cleanup.")
+            # Delete OpenWebUI files specifically for this old_chat_id if it's truly gone.
+            # The delete_openwebui_files_for_chat checks if files are used by *other* active chats.
+            webui_del_result = self.delete_openwebui_files_for_chat(old_chat_id)
+            log.info(f"OpenWebUI file deletion result for specifically orphaned chat {old_chat_id}: {webui_del_result}")
             
-            if "error" in merge_result:
-                response = f"Erreur lors de la fusion des fichiers: {merge_result['error']}"
-            else:
-                # Get the merged file path from the result
-                merged_file = merge_result.get("merged_file")
-                if merged_file:
-                    # Upload the merged file to OpenWebUI and get download URL
-                    upload_result = self.download_file_openwebui(merged_file)
-                    if "error" in upload_result:
-                        response = f"Les fichiers ont été fusionnés avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
-                    else:
-                        response = f"Les fichiers ont été fusionnés avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
-                else:
-                    response = "Les fichiers ont été fusionnés avec succès, mais le chemin du fichier fusionné n'a pas été trouvé."
-                
-                # Save mappings after uploading the merged file
-                self.save_file_mappings()
-            
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
-            return
-
-        elif "/regroup" in message:
-            # First, get the structure of all files
-            if self.cached_structure is None:
-                structure_result = self.analyze_slide_structure(self.chat_id)
-                if "error" in structure_result:
-                    response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
-                    yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                    yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                    self.last_response = response
-                    return
-            else:
-                # Vérifier si cached_structure est la structure JSON brute ou du texte formaté
-                if isinstance(self.cached_structure, str):
-                    # C'est du texte formaté, on doit récupérer la structure brute
-                    structure_result = self.analyze_slide_structure(self.chat_id)
-                    if "error" in structure_result:
-                        response = f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
-                        yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                        yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                        self.last_response = response
-                        return
-                else:
-                    structure_result = self.cached_structure
-            
-            # Vérifier que structure_result est bien un dictionnaire
-            if not isinstance(structure_result, dict) or "projects" not in structure_result:
-                response = f"Erreur: structure de données invalide. Type: {type(structure_result)}"
-                yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-                yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-                self.last_response = response
-                return
-            
-            
-            # Demander au LLM de identifier les projets avec des noms similaires
-            grouping_prompt = f"""Tu es un assistant qui analyse des noms de projets pour identifier ceux qui sont similaires ou liés.
-            
-            Voici les projets, concentres-toi sur les noms de projets seulement :
-            {structure_result["projects"].keys()}
-            
-            Ton travail est d'identifier les groupes de projets qui ont des noms similaires ou qui font partie du même projet principal.
-            
-            RÈGLES:
-            1. Regroupe les projets qui ont des noms similaires (ex: "NU" et "NU Gate" font partie du même groupe)
-            2. Regroupe les projets qui ont des parties communes (ex: "NU" et "NU_PDCA" font partie du même groupe)
-            3. Ignore les différences de casse et les caractères spéciaux
-            
-            RÉPONSE: Renvoie UNIQUEMENT une liste JSON de listes, où chaque sous-liste contient les noms des projets à regrouper ensemble.
-            Si un projet n'a pas de similaire, ne l'inclus pas dans la réponse.
-            
-            Exemple de format de réponse:
-            [
-                ["NU", "NU Gate"],
-                ["NU", "NU_PDCA"],
-                ["Projet1", "Projet1_Sub"]
-            ]
-            
-            RÉPONDS UNIQUEMENT AVEC LA LISTE JSON, SANS AUTRE TEXTE."""
-            
-            try:
-                # Obtenir la réponse du LLM
-                grouping_response = remove_tags_no_keep(self.small_model.invoke(grouping_prompt), '<think>', '</think>')
-                log.info(f"LLM grouping response: {grouping_response}")
-                
-                # Extraire les groupes de projets
-                try:
-                    groups_to_merge = extract_json(grouping_response)
-                    if not isinstance(groups_to_merge, list):
-                        log.warning("LLM response is not a list, trying to extract list from response")
-                        groups_to_merge = []
-                except:
-                    log.warning("Could not extract valid JSON from LLM response, no grouping will be performed")
-                    groups_to_merge = []
-                
-                log.info(f"Groups to merge: {groups_to_merge}")
-                
-                # Créer une copie de la structure pour modification
-                new_structure = json.loads(json.dumps(structure_result))
-                
-                # Traiter chaque groupe de projets à regrouper
-                for group in groups_to_merge:
-                    if not isinstance(group, list) or len(group) < 2:
-                        continue
-                    
-                    # Créer un mapping entre noms originaux et noms nettoyés
-                    original_to_cleaned = {}
-                    cleaned_to_original = {}
-                    
-                    for original_name in group:
-                        cleaned_name = original_name.replace('\n', ' ').strip()
-                        original_to_cleaned[original_name] = cleaned_name
-                        cleaned_to_original[cleaned_name] = original_name
-                    
-                    cleaned_group = list(cleaned_to_original.keys())
-                    log.info(f"Original group: {group}, cleaned group: {cleaned_group}")
-                    
-                    # Identifier le projet principal (généralement le nom le plus court ou le plus générique)
-                    main_project_cleaned = min(cleaned_group, key=len)
-                    main_project_original = cleaned_to_original[main_project_cleaned]
-                    
-                    # Trouver les autres projets en utilisant les noms originaux
-                    other_projects_cleaned = [p for p in cleaned_group if p != main_project_cleaned]
-                    other_projects_original = [cleaned_to_original[p] for p in other_projects_cleaned 
-                                             if cleaned_to_original[p] in new_structure["projects"]]
-                    
-                    log.info(f"Regrouping: main={main_project_cleaned} (original: {main_project_original}), others={other_projects_cleaned}")
-                    log.info(f"Original project keys to process: main={main_project_original}, others={other_projects_original}")
-                    
-                    # Vérifier que le projet principal existe (en utilisant le nom original)
-                    if main_project_original not in new_structure["projects"]:
-                        log.warning(f"Main project '{main_project_original}' not found in structure, skipping group")
-                        log.info(f"Available projects: {list(new_structure['projects'].keys())}")
-                        continue
-                    
-                    # Regrouper les autres projets sous le projet principal
-                    for other_project_original in other_projects_original:
-                        if other_project_original in new_structure["projects"]:
-                            try:
-                                other_data = new_structure["projects"][other_project_original]
-                                other_project_cleaned = original_to_cleaned[other_project_original]
-                                
-                                # Déterminer le nom du sous-projet (enlever la partie commune)
-                                sub_name = other_project_cleaned.replace(main_project_cleaned, "").strip("_").strip()
-                                if not sub_name:
-                                    sub_name = other_project_cleaned
-                                
-                                # Vérifier si le projet principal est terminal ou a déjà des sous-projets
-                                if "information" in new_structure["projects"][main_project_original]:
-                                    # C'est un projet terminal, on doit le convertir en projet avec sous-projets
-                                    main_data = {
-                                        "information": new_structure["projects"][main_project_original].get("information", ""),
-                                        "critical": new_structure["projects"][main_project_original].get("critical", []),
-                                        "small": new_structure["projects"][main_project_original].get("small", []),
-                                        "advancements": new_structure["projects"][main_project_original].get("advancements", [])
-                                    }
-                                    
-                                    # Reconstruire le projet principal avec ses données comme sous-projet "Général"
-                                    new_structure["projects"][main_project_original] = {
-                                        "Général": main_data,
-                                        sub_name: other_data
-                                    }
-                                else:
-                                    # Le projet principal a déjà des sous-projets, on ajoute celui-ci
-                                    new_structure["projects"][main_project_original][sub_name] = other_data
-                                
-                                # Supprimer l'ancien projet (en utilisant le nom original)
-                                del new_structure["projects"][other_project_original]
-                                
-                                log.info(f"Moved {other_project_original} to {main_project_original}.{sub_name}")
-                            except Exception as e:
-                                log.error(f"Error moving project {other_project_original} to {main_project_original}: {str(e)}")
-                                continue
-                
-                # Mettre à jour le cache avec la nouvelle structure
-                self.cached_structure = new_structure
-                
-                # Créer directement la présentation en utilisant update_table_with_project_data
-                try:
-                    log.info("Starting PowerPoint generation process")
-                    try:
-                        from src.services.update_pttx_service import update_table_with_project_data
-                        log.info("Successfully imported update_table_with_project_data")
-                    except ImportError as ie:
-                        log.error(f"Failed to import update_table_with_project_data: {str(ie)}")
-                        raise ie
-                    
-                    try:
-                        from pptx import Presentation
-                        from pptx.util import Pt
-                        log.info("Successfully imported PowerPoint libraries")
-                    except ImportError as ie:
-                        log.error(f"Failed to import PowerPoint libraries: {str(ie)}")
-                        raise ie
-                    
-                    # Créer les dossiers nécessaires
-                    output_regroup = os.path.join("OUTPUT", self.chat_id, "regrouped")
-                    os.makedirs(output_regroup, exist_ok=True)
-                    log.info(f"Created output directory: {output_regroup}")
-                    
-                    # Nom du fichier de sortie avec timestamp
-                    import datetime
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    output_file = os.path.join(output_regroup, f"regrouped_{timestamp}.pptx")
-                    log.info(f"Target output file: {output_file}")
-                    
-                    # Créer une présentation vide ou utiliser un template
-                    template_path = os.path.join("templates", "CRA_TEMPLATE_IA.pptx")
-                    try:
-                        if os.path.exists(template_path):
-                            log.info(f"Using template: {template_path}")
-                            prs = Presentation(template_path)
-                        else:
-                            log.info("Creating blank presentation")
-                            prs = Presentation()
-                            slide = prs.slides.add_slide(prs.slide_layouts[5])  # Blank layout
-                            table_shape = slide.shapes.add_table(rows=10, cols=3, left=Pt(30), top=Pt(30), width=Pt(600), height=Pt(400))
-                        log.info("Presentation created successfully")
-                    except Exception as pe:
-                        log.error(f"Error creating presentation: {str(pe)}")
-                        raise pe
-                    
-                    # Sauvegarder temporairement
-                    temp_path = os.path.join(output_regroup, "temp.pptx")
-                    log.info(f"Saving temporary file: {temp_path}")
-                    try:
-                        prs.save(temp_path)
-                        log.info("Temporary file saved successfully")
-                    except Exception as se:
-                        log.error(f"Error saving temporary file: {str(se)}")
-                        raise se
-                    
-                    # Mettre à jour la présentation avec les données regroupées
-                    log.info("Updating presentation with regrouped data")
-                    log.info(f"Project data keys: {list(new_structure['projects'].keys())}")
-                    log.info(f"Upcoming events: {new_structure.get('upcoming_events', {})}")
-                    
-                    try:
-                        log.info("CALLING update_table_with_project_data...")
-                        # Utiliser le premier slide (index 0) et la première table (index 0)
-                        updated_path = update_table_with_project_data(
-                            temp_path, 
-                            0, 
-                            0, 
-                            new_structure["projects"],
-                            output_file,
-                            new_structure.get("upcoming_events", {})
-                        )
-                        log.info(f"PowerPoint updated successfully: {updated_path}")
-                    except Exception as ue:
-                        log.error(f"Error updating PowerPoint with project data: {str(ue)}")
-                        log.exception("Update PowerPoint error details:")
-                        raise ue
-                    
-                    # Supprimer le fichier temporaire
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                            log.info("Temporary file cleaned up")
-                    except Exception as ce:
-                        log.error(f"Error cleaning up temporary file: {str(ce)}")
-                        # Ne pas interrompre pour un problème de nettoyage
-                    
-                    # Upload to OpenWebUI and get download URL
-                    log.info("Uploading file to OpenWebUI")
-                    try:
-                        upload_result = self.download_file_openwebui(updated_path)
-                        if "error" in upload_result:
-                            response = f"Les informations des projets ont été regroupées avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
-                        else:
-                            response = f"Les informations des projets ont été regroupées avec succès. {len(groups_to_merge)} groupe(s) de projets similaires ont été fusionnés.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
-                            # Save mappings after uploading the new file
-                            self.save_file_mappings()
-                            log.info("File uploaded and mappings saved successfully")
-                    except Exception as upe:
-                        log.error(f"Error uploading file to OpenWebUI: {str(upe)}")
-                        response = f"Les informations des projets ont été regroupées avec succès, mais une erreur s'est produite lors du téléchargement: {str(upe)}"
-                except Exception as e:
-                    log.error(f"Error during PowerPoint generation: {str(e)}")
-                    log.exception("PowerPoint generation error details:")
-                    response = f"Erreur lors de la génération de la présentation PowerPoint: {str(e)}"
-            
-            except Exception as e:
-                log.error(f"Error during regrouping: {str(e)}")
-                log.exception("Full error details:")
-                response = f"Erreur lors de la réorganisation des données: {str(e)}"
-            
-            yield f"data: {json.dumps({'choices': [{'message': {'content': response}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            self.last_response = response
-            return
-        # Ajouter la dernière réponse au contexte si elle existe
-        if user_message:
-            user_message += f"\n\n *Last response generated :* {self.last_response}"
+            # Local folders (upload, output, mappings) for old_chat_id will be handled by
+            # cleanup_orphaned_conversations if old_chat_id is not in active_conversations.
         else:
-            # Afficher les commandes disponibles si aucune réponse précédente
-            commands = """Les commandes sont les suivantes : 
+            log.info(f"Old chat ID {old_chat_id} is still considered active. No specific targeted deletion.")
 
-/summarize [instructions] --> Affiche les résumés existants et demande confirmation avant d'en générer un nouveau. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
-/structure --> Renvoie la structure des fichiers 
-/clear [IDs] --> Nettoie tous les dossiers orphelins et supprime les fichiers associés dans OpenWebUI (préserve la conversation actuelle et éventuellement d'autres IDs spécifiés)
-/generate --> Génère tout le pptx en fonction du texte ( /generate [Avancements de la semaine])
-/merge --> Fusionne tous les fichiers pptx envoyés
-/regroup --> Regroupe les informations des projets similaires ou liés
-            """
-            self.last_response = commands
-            yield f"data: {json.dumps({'choices': [{'message': {'content': commands}}]})}\n\n"
-            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
-            return
-        
-        # Initialiser le contenu cumulatif
-        cumulative_content = ""
-        user_message = self.system_prompt + "\n\n" + user_message
-        
-        try:
-            # Format standard OpenAI-like qui est attendu par OpenWebUI
-            # Premier message pour initialiser le stream
-            yield f"data: {json.dumps({'choices': [{'delta': {'role': 'assistant'}}]})}\n\n"
+        # Run the general cleanup process which handles all non-active chats
+        cleanup_result = self.cleanup_orphaned_conversations()
+        log.info(f"General orphaned conversation cleanup result during chat switch: {cleanup_result}")
+
+    def get_existing_summaries(self, folder_name=None): # folder_name is chat_id
+        """
+        Get list of existing summary files for the current chat_id (via file_manager).
+        Uploads them to OpenWebUI via file_manager to get URLs.
+        """
+        current_chat_id = folder_name if folder_name else self.file_manager.chat_id
+        if not current_chat_id:
+            log.warning("No chat_id available in get_existing_summaries.")
+            return []
             
-            # Streamer la réponse depuis le modèle
-            for chunk in self.streaming_model.stream(user_message):
-                if isinstance(chunk, str):
-                    content_delta = chunk
-                else:
-                    content_delta = chunk.content if hasattr(chunk, 'content') else str(chunk)
-                
-                # Nettoyer le contenu pour éviter les problèmes de formatage
-                content_delta = content_delta.replace('\r', '')
-                
-                # Ajouter au contenu cumulatif
-                cumulative_content += content_delta
-                
-                # Envoi de l'événement au client si un émetteur est disponible
-                if __event_emitter__:
-                    __event_emitter__({"type": "content_delta", "delta": content_delta})
-                
-                # Format compatible avec le standard OpenAI utilisé par OpenWebUI
-                delta_response = {
-                    "choices": [
-                        {
-                            "delta": {"content": content_delta}
-                        }
-                    ]
-                }
-                
-                # Yield en format SSE (Server-Sent Events)
-                yield f"data: {json.dumps(delta_response)}\n\n"
-                
-            # Message de fin spécifique
-            yield f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-            yield f"data: [DONE]\n\n"  # Signal de fin standard OpenAI
-            
-        except Exception as e:
-            error_message = f"Erreur lors du streaming de la réponse: {str(e)}"
-            if __event_emitter__:
-                __event_emitter__({"type": "error", "error": error_message})
-            yield f"data: {json.dumps({'error': error_message})}\n\n"
-            yield f"data: [DONE]\n\n"  # Même en cas d'erreur, on ferme proprement
-            return
+        log.info(f"Getting existing summaries for chat: {current_chat_id}")
+        summaries = [] # List of (display_name, url)
+
+        output_dir_for_chat = acra_config.get_conversation_output_folder(current_chat_id)
+        upload_dir_for_chat = acra_config.get_conversation_upload_folder(current_chat_id)
+
+        # Check OUTPUT folder
+        if os.path.exists(output_dir_for_chat):
+            for filename in os.listdir(output_dir_for_chat):
+                if filename.lower().endswith(".pptx"): # Or use acra_config allowed extensions
+                    file_path = os.path.join(output_dir_for_chat, filename)
+                    upload_result = self.file_manager.upload_to_openwebui(file_path)
+                    if "download_url" in upload_result:
+                        summaries.append((f"OUTPUT/{filename}", upload_result["download_url"]))
+            else:
+                        log.error(f"Failed to get OpenWebUI URL for summary {file_path}: {upload_result.get('error')}")
         
-        self.last_response = cumulative_content
+        # Check UPLOAD folder (for reports/summaries that might be saved there)
+        if os.path.exists(upload_dir_for_chat):
+            for filename in os.listdir(upload_dir_for_chat):
+                # Heuristic to identify summary-like files in upload folder
+                if filename.lower().endswith(".pptx") and ("_summary_" in filename.lower() or "_report_" in filename.lower() or "regrouped_" in filename.lower()):
+                    file_path = os.path.join(upload_dir_for_chat, filename)
+                    upload_result = self.file_manager.upload_to_openwebui(file_path)
+                    if "download_url" in upload_result:
+                        summaries.append((f"Uploads/{filename}", upload_result["download_url"])) # Indicate source
+            else:
+                        log.error(f"Failed to get OpenWebUI URL for file {file_path} in uploads: {upload_result.get('error')}")
+            
+        if summaries: # If any files were (re-)uploaded, their mappings might have been updated
+            self.file_manager.save_file_mappings()
+                
+        log.info(f"Found {len(summaries)} existing summaries/reports for chat {current_chat_id}: {summaries}")
+        return summaries
 
     def delete_file(self, file_path, update_mapping=True):
         """
-        Supprime un fichier spécifique et met à jour le mapping si nécessaire.
-        
-        Args:
-            file_path (str): Chemin du fichier à supprimer
-            update_mapping (bool): Si True, met à jour le mapping des fichiers
-            
-        Returns:
-            dict: Résultat de l'opération
+        Deletes a specific file. Delegates to FileManager.
+        The file_path here should be an absolute path to a local file.
         """
-        try:
-            abs_path = os.path.abspath(file_path)
-            log.info(f"Deleting file: {abs_path}")
-            
-            if not os.path.exists(abs_path):
-                log.warning(f"File not found: {abs_path}")
-                return {"error": "Fichier non trouvé"}
-            
-            # Delete the file
-            os.remove(abs_path)
-            log.info(f"File deleted successfully: {abs_path}")
-            
-            # Update mapping if requested
-            if update_mapping and abs_path in self.file_id_mapping:
-                file_id = self.file_id_mapping[abs_path]
-                del self.file_id_mapping[abs_path]
-                log.info(f"Removed mapping for file {abs_path} with ID {file_id}")
-                self.save_file_mappings()
-            
-            return {"message": f"Fichier {os.path.basename(file_path)} supprimé avec succès"}
-        except Exception as e:
-            log.error(f"Error deleting file {file_path}: {str(e)}")
-            return {"error": f"Erreur lors de la suppression du fichier: {str(e)}"}
+        log.info(f"Pipeline.delete_file called for: {file_path}")
+        return self.file_manager.delete_file(file_path=file_path, update_mapping=update_mapping)
 
     def cleanup_orphaned_mappings(self):
         """
-        Nettoie les mappings qui pointent vers des fichiers qui n'existent plus.
-        
-        Returns:
-            int: Nombre de mappings supprimés
+        Cleans mappings in FileManager that point to non-existent files.
+        Delegates to FileManager.
         """
-        orphaned_mappings = []
-        
-        # Find all mappings pointing to files that no longer exist
-        for file_path, file_id in list(self.file_id_mapping.items()):
-            if not os.path.exists(file_path):
-                orphaned_mappings.append((file_path, file_id))
-        
-        # Remove orphaned mappings
-        removed_count = 0
-        for file_path, file_id in orphaned_mappings:
-            log.info(f"Removing orphaned mapping: {file_path} -> {file_id}")
-            del self.file_id_mapping[file_path]
-            removed_count += 1
-        
-        # Save updated mappings if any were removed
-        if removed_count > 0:
-            log.info(f"Removed {removed_count} orphaned mappings")
-            self.save_file_mappings()
-        else:
-            log.info("No orphaned mappings found")
-        
-        return removed_count
+        log.info("Pipeline.cleanup_orphaned_mappings called.")
+        return self.file_manager.cleanup_orphaned_mappings()
 
     def force_cleanup_old_folders(self, exclude_chat_ids=None):
         """
-        Méthode simplifiée pour nettoyer les dossiers qui ne correspondent pas aux IDs de chat exclus.
-        Cette méthode est utilisée comme dernier recours pour nettoyer les anciens dossiers.
-        
-        Args:
-            exclude_chat_ids (list): Liste des IDs de chat à conserver
-            
-        Returns:
-            dict: Résultats du nettoyage
+        Simplified method to clean folders not matching excluded chat IDs.
+        This is a more aggressive cleanup.
+        It should use get_active_conversation_ids for safety.
         """
         if exclude_chat_ids is None:
             exclude_chat_ids = []
             
-        # Toujours préserver le chat_id actuel
-        if self.chat_id and self.chat_id not in exclude_chat_ids:
-            exclude_chat_ids.append(self.chat_id)
-            
-        log.info(f"Force cleaning folders, excluding: {exclude_chat_ids}")
+        # Always preserve the current chat_id from FileManager
+        current_fm_chat_id = self.file_manager.chat_id
+        if current_fm_chat_id and current_fm_chat_id not in exclude_chat_ids:
+            exclude_chat_ids.append(current_fm_chat_id)
         
-        # Obtenir également la liste des chats actifs pour comparer et ajouter des mesures de sécurité
-        active_chats = self.get_active_conversation_ids()
-        log.info(f"Active chats from database: {active_chats}")
+        log.info(f"Force cleaning folders, initial exclusions: {exclude_chat_ids}")
         
-        # Ajouter à la liste d'exclusion les chats actifs qui n'y sont pas déjà
-        for chat_id in active_chats:
-            if chat_id not in exclude_chat_ids:
-                log.info(f"Adding active chat to exclusion list: {chat_id}")
-                exclude_chat_ids.append(chat_id)
-                
-        log.info(f"Final exclusion list: {exclude_chat_ids}")
+        # Get all truly active conversations from DB/fallback as the source of truth for preservation
+        safe_to_preserve_ids = self.get_active_conversation_ids()
+        log.info(f"Active chats from DB/fallback (for safety): {safe_to_preserve_ids}")
         
-        deleted_folders = 0
-        deleted_files = 0
-        deleted_webui_files = 0
+        # Combine exclude_chat_ids with safe_to_preserve_ids
+        final_exclude_ids = list(set(exclude_chat_ids + safe_to_preserve_ids))
+        log.info(f"Final exclusion list for force_cleanup: {final_exclude_ids}")
         
-        # Lister tous les dossiers à nettoyer
-        folders_to_clean = []
+        deleted_folders_count = 0
+        deleted_files_in_folders_count = 0
+        deleted_webui_files_count = 0
         
-        # Trouver les dossiers dans UPLOAD_FOLDER
-        if os.path.exists(UPLOAD_FOLDER):
-            for folder_name in os.listdir(UPLOAD_FOLDER):
-                folder_path = os.path.join(UPLOAD_FOLDER, folder_name)
-                if os.path.isdir(folder_path) and folder_name not in exclude_chat_ids:
-                    folders_to_clean.append(folder_name)
-        
-        # Trouver les dossiers dans OUTPUT_FOLDER qui ne sont pas déjà dans la liste
-        if os.path.exists(OUTPUT_FOLDER):
-            for folder_name in os.listdir(OUTPUT_FOLDER):
-                folder_path = os.path.join(OUTPUT_FOLDER, folder_name)
-                if os.path.isdir(folder_path) and folder_name not in exclude_chat_ids and folder_name not in folders_to_clean:
-                    folders_to_clean.append(folder_name)
-        
-        log.info(f"Dossiers à nettoyer: {folders_to_clean}")
-        
-        # Mesure de sécurité - Si tous les dossiers sont exclus, ne pas continuer
-        if not folders_to_clean:
-            log.info("Aucun dossier à nettoyer après exclusion des chats actifs.")
-            return {
-                "status": "success",
-                "message": "Aucun dossier à nettoyer",
-                "deleted_folders": 0,
-                "deleted_files": 0,
-                "deleted_webui_files": 0,
-                "preserved_chats": exclude_chat_ids,
-                "cleaned_chats": []
-            }
-        
-        # Pour chaque dossier à nettoyer
-        for chat_id in folders_to_clean:
-            # Mesure de sécurité - Vérifier si le dossier contient des fichiers récents (moins de 1 jour)
-            # Si c'est le cas, le considérer comme actif et l'ignorer
-            upload_folder_path = os.path.join(UPLOAD_FOLDER, chat_id)
-            output_folder_path = os.path.join(OUTPUT_FOLDER, chat_id)
-            
-            is_recent = False
-            try:
-                # Vérifier si des fichiers ont été modifiés récemment (moins de 24h)
-                current_time = time.time()
-                one_day_ago = current_time - (24 * 60 * 60)  # 24 heures en secondes
-                
-                # Vérifier dans le dossier UPLOAD
-                if os.path.exists(upload_folder_path):
-                    for filename in os.listdir(upload_folder_path):
-                        file_path = os.path.join(upload_folder_path, filename)
-                        if os.path.isfile(file_path):
-                            mod_time = os.path.getmtime(file_path)
-                            if mod_time > one_day_ago:
-                                log.warning(f"Récent fichier trouvé dans {upload_folder_path}: {filename}. Préservation du dossier.")
-                                is_recent = True
-                                break
-                
-                # Vérifier dans le dossier OUTPUT
-                if not is_recent and os.path.exists(output_folder_path):
-                    for filename in os.listdir(output_folder_path):
-                        file_path = os.path.join(output_folder_path, filename)
-                        if os.path.isfile(file_path):
-                            mod_time = os.path.getmtime(file_path)
-                            if mod_time > one_day_ago:
-                                log.warning(f"Récent fichier trouvé dans {output_folder_path}: {filename}. Préservation du dossier.")
-                                is_recent = True
-                                break
-            except Exception as e:
-                log.error(f"Erreur lors de la vérification des fichiers récents: {str(e)}")
-                # En cas d'erreur, considérer le dossier comme récent par sécurité
-                is_recent = True
-            
-            if is_recent:
-                log.info(f"Préservation du chat {chat_id} car des fichiers récents y ont été trouvés")
+        folders_actually_cleaned = []
+
+        # Directories to check: UPLOAD_FOLDER, OUTPUT_FOLDER, MAPPINGS_FOLDER
+        dirs_to_scan = {
+            acra_config.upload_folder: "upload_dir",
+            acra_config.output_folder: "output_dir",
+            acra_config.mappings_folder: "mappings_dir_files" # Special handling for files here
+        }
+
+        for dir_path, dir_type in dirs_to_scan.items():
+            if not os.path.exists(dir_path):
+                log.warning(f"Directory {dir_path} for {dir_type} does not exist. Skipping.")
                 continue
+
+            for item_name in os.listdir(dir_path):
+                item_path = os.path.join(dir_path, item_name)
+                chat_id_of_item = None
+
+                if dir_type == "mappings_dir_files":
+                    if item_name.endswith("_file_mappings.json") and os.path.isfile(item_path):
+                        chat_id_of_item = item_name.split("_file_mappings.json")[0]
+                    else:
+                        continue # Not a mapping file
+                elif os.path.isdir(item_path): # For upload and output dirs
+                    chat_id_of_item = item_name
+                else: # Not a dir in upload/output
+                    continue
             
-            # 1. D'abord, supprimer les fichiers dans OpenWebUI
-            log.info(f"Suppression des fichiers OpenWebUI pour le chat: {chat_id}")
-            webui_result = self.delete_openwebui_files_for_chat(chat_id)
-            deleted_webui_files += webui_result.get("deleted_count", 0)
-            log.info(f"Résultat de suppression OpenWebUI: {webui_result}")
-            
-            # 2. Ensuite, supprimer le dossier dans UPLOAD_FOLDER
-            if os.path.exists(upload_folder_path):
-                log.info(f"Suppression du dossier: {upload_folder_path}")
-                try:
-                    file_count = len([f for f in os.listdir(upload_folder_path) 
-                                    if os.path.isfile(os.path.join(upload_folder_path, f))])
-                    deleted_files += file_count
-                    shutil.rmtree(upload_folder_path, ignore_errors=True)
-                    deleted_folders += 1
-                    log.info(f"Dossier supprimé: {upload_folder_path}")
-                except Exception as e:
-                    log.error(f"Erreur lors de la suppression du dossier {upload_folder_path}: {str(e)}")
-            
-            # 3. Supprimer le dossier dans OUTPUT_FOLDER
-            if os.path.exists(output_folder_path):
-                log.info(f"Suppression du dossier: {output_folder_path}")
-                try:
-                    file_count = len([f for f in os.listdir(output_folder_path) 
-                                    if os.path.isfile(os.path.join(output_folder_path, f))])
-                    deleted_files += file_count
-                    shutil.rmtree(output_folder_path, ignore_errors=True)
-                    deleted_folders += 1
-                    log.info(f"Dossier supprimé: {output_folder_path}")
-                except Exception as e:
-                    log.error(f"Erreur lors de la suppression du dossier {output_folder_path}: {str(e)}")
-            
-            # 4. Supprimer le fichier de mapping
-            mapping_file = os.path.join(MAPPINGS_FOLDER, f"{chat_id}_file_mappings.json")
-            if os.path.exists(mapping_file):
-                log.info(f"Suppression du fichier de mapping: {mapping_file}")
-                try:
-                    os.remove(mapping_file)
-                    log.info(f"Fichier de mapping supprimé: {mapping_file}")
-                except Exception as e:
-                    log.error(f"Erreur lors de la suppression du fichier de mapping {mapping_file}: {str(e)}")
+                if chat_id_of_item and chat_id_of_item not in final_exclude_ids:
+                    log.info(f"Force cleanup target: {item_path} (chat_id: {chat_id_of_item})")
+                    
+                    # Safety: Check for recent modification (less than CLEANUP_RETENTION_HOURS from config)
+                    try:
+                        retention_hours = acra_config.get("CLEANUP_RETENTION_HOURS", 24)
+                        item_mod_time = os.path.getmtime(item_path)
+                        if (time.time() - item_mod_time) / 3600 < retention_hours:
+                            log.warning(f"Item {item_path} was modified recently. Skipping force cleanup for this item.")
+                            # Add to final_exclude_ids to prevent re-processing in this run
+                            final_exclude_ids.append(chat_id_of_item)
+                            final_exclude_ids = list(set(final_exclude_ids))
+                            continue
+                    except Exception as e:
+                        log.error(f"Error checking modification time for {item_path}: {e}. Skipping for safety.")
+                        continue # Skip if can't check mod time
+
+                    folders_actually_cleaned.append(chat_id_of_item)
+                    
+                    # 1. Delete OpenWebUI files for this chat_id_of_item
+                    webui_del_res = self.delete_openwebui_files_for_chat(chat_id_of_item)
+                    deleted_webui_files_count += webui_del_res.get("deleted_count", 0)
+                    
+                    # 2. Delete local item
+                    try:
+                        if dir_type == "mappings_dir_files":
+                            os.remove(item_path)
+                            log.info(f"Force deleted mapping file: {item_path}")
+                        else: # Upload or output directory
+                            files_inside = 0
+                            for _, _, files_in_subdir in os.walk(item_path): files_inside += len(files_in_subdir)
+                            shutil.rmtree(item_path, ignore_errors=True)
+                            deleted_folders_count += 1
+                            deleted_files_in_folders_count += files_inside
+                            log.info(f"Force deleted folder: {item_path} (contained {files_inside} files)")
+                    except Exception as e:
+                        log.error(f"Error during force deletion of {item_path}: {e}")
             
         result = {
             "status": "success",
-            "deleted_folders": deleted_folders,
-            "deleted_files": deleted_files,
-            "deleted_webui_files": deleted_webui_files,
-            "preserved_chats": exclude_chat_ids,
-            "cleaned_chats": folders_to_clean
+            "deleted_folders": deleted_folders_count,
+            "deleted_files_in_folders": deleted_files_in_folders_count,
+            "deleted_webui_files": deleted_webui_files_count,
+            "preserved_chats_total": final_exclude_ids, # Show all that were ultimately preserved
+            "cleaned_chat_ids": list(set(folders_actually_cleaned))
         }
-        
-        log.info(f"Résultats du nettoyage forcé: {result}")
+        log.info(f"Force cleanup results: {result}")
         return result
 
     def delete_file_from_openwebui(self, file_id, active_files_mapping=None):
         """
-        Supprime un fichier dans OpenWebUI via l'API.
-        
-        Args:
-            file_id (str): L'ID du fichier à supprimer
-            active_files_mapping (dict): Dictionnaire contenant tous les mappings des conversations actives
-            
-        Returns:
-            bool: True si la suppression a réussi, False sinon
+        Deletes a file in OpenWebUI via API.
+        This is a helper and needs OPENWEBUI_API_URL and OPENWEBUI_API_KEY from acra_config.
+        The active_files_mapping is crucial for safety.
         """
         try:
             if not file_id:
-                log.warning("Tentative de suppression d'un fichier sans ID")
+                log.warning("Attempted to delete OpenWebUI file without an ID.")
                 return False
                 
-            # Vérifier si le fichier est utilisé par d'autres conversations actives
+            # Safety check: Is this file_id used by any *other* active conversations?
+            # active_files_mapping should be {file_id: [list_of_active_chat_ids_using_it]}
             if active_files_mapping and file_id in active_files_mapping:
-                log.info(f"Le fichier {file_id} est toujours utilisé par d'autres conversations actives. Pas de suppression.")
-                return False
-                
-            url = f"{self.openwebui_api}files/{file_id}"
+                log.info(f"File {file_id} is in active_files_mapping, indicating potential use by other active chats. Deferring to caller logic.")
+                pass
+
+
+            url = f"{acra_config.get('OPENWEBUI_API_URL')}files/{file_id}" # Use acra_config
             headers = {
                 "accept": "application/json",
-                "Authorization": f"Bearer {self.openwebui_api_key}"
+                "Authorization": f"Bearer {acra_config.get('OPENWEBUI_API_KEY')}" # Use acra_config
             }
             
-            log.info(f"Suppression du fichier OpenWebUI avec ID: {file_id}")
+            log.info(f"Attempting to delete OpenWebUI file with ID: {file_id} via URL: {url}")
             response = requests.delete(url, headers=headers)
             
-            if response.status_code in [200, 204]:
-                log.info(f"Fichier {file_id} supprimé avec succès dans OpenWebUI")
+            if response.status_code in [200, 204]: # 204 No Content is also success
+                log.info(f"File {file_id} deleted successfully from OpenWebUI.")
+                return True
+            elif response.status_code == 404:
+                log.info(f"File {file_id} not found in OpenWebUI (already deleted or never existed). Considered success for cleanup.")
                 return True
             else:
-                log.error(f"Échec de suppression du fichier {file_id} dans OpenWebUI: {response.status_code} - {response.text}")
+                log.error(f"Failed to delete file {file_id} from OpenWebUI: {response.status_code} - {response.text}")
                 return False
         except Exception as e:
-            log.error(f"Erreur lors de la suppression du fichier {file_id} dans OpenWebUI: {str(e)}")
+            log.error(f"Exception during OpenWebUI file deletion for ID {file_id}: {str(e)}")
             return False
             
-    def get_all_active_files_mapping(self):
+    def get_all_active_files_mapping(self) -> Dict[str, List[str]]:
         """
-        Récupère tous les fichiers utilisés par des conversations actives.
-        
-        Returns:
-            dict: Dictionnaire des fichiers utilisés {file_id: [chat_ids]}
+        Retrieves a map of {file_id: [chat_ids]} for all files used by *active* conversations.
+        Used for safety checks before deleting OpenWebUI files.
         """
-        active_chats = self.get_active_conversation_ids()
-        all_files = {}  # {file_id: [list of chat_ids]}
+        active_chat_ids = self.get_active_conversation_ids()
+        all_active_files_map: Dict[str, List[str]] = {}
         
-        # Parcourir tous les fichiers de mapping
-        if os.path.exists(MAPPINGS_FOLDER):
-            try:
-                for filename in os.listdir(MAPPINGS_FOLDER):
-                    if filename.endswith("_file_mappings.json"):
-                        chat_id = filename.split("_file_mappings.json")[0]
-                        
-                        # Vérifier seulement les mappings des conversations actives
-                        if chat_id in active_chats:
-                            mapping_file = os.path.join(MAPPINGS_FOLDER, filename)
-                            if os.path.exists(mapping_file):
-                                try:
-                                    with open(mapping_file, 'r') as f:
-                                        try:
-                                            chat_mappings = json.load(f)
-                                            # Inverser le mapping pour avoir file_id: [chat_ids]
-                                            for file_path, file_id in chat_mappings.items():
-                                                if file_id not in all_files:
-                                                    all_files[file_id] = []
-                                                if chat_id not in all_files[file_id]:
-                                                    all_files[file_id].append(chat_id)
-                                        except json.JSONDecodeError:
-                                            log.error(f"Erreur de décodage JSON pour {mapping_file}")
-                                except Exception as e:
-                                    log.error(f"Erreur de lecture du fichier {mapping_file}: {str(e)}")
-            except Exception as e:
-                log.error(f"Erreur lors du parcours du dossier des mappings: {str(e)}")
-        
-        log.info(f"Trouvé {len(all_files)} fichiers utilisés par des conversations actives")
-        return all_files
+        mappings_dir = acra_config.mappings_folder
+        if not os.path.exists(mappings_dir):
+            log.warning(f"Mappings directory {mappings_dir} not found. Cannot build active files map.")
+            return all_active_files_map
 
-    def delete_openwebui_files_for_chat(self, chat_id):
-        """
-        Supprime tous les fichiers OpenWebUI associés à un chat ID spécifique.
-        Vérifie d'abord que les fichiers ne sont pas utilisés par d'autres conversations actives.
-        
-        Args:
-            chat_id (str): L'ID du chat dont les fichiers doivent être supprimés
+        for filename in os.listdir(mappings_dir):
+            if filename.endswith("_file_mappings.json"):
+                chat_id_of_mapping_file = filename.split("_file_mappings.json")[0]
+                
+                if chat_id_of_mapping_file in active_chat_ids: # Only process for active chats
+                    mapping_file_path = os.path.join(mappings_dir, filename)
+                    try:
+                        with open(mapping_file_path, 'r') as f:
+                            # The stored mapping is {local_abs_path: openwebui_file_id}
+                            chat_specific_mappings = json.load(f)
+                            for local_path, openwebui_file_id in chat_specific_mappings.items():
+                                if openwebui_file_id: # Ensure file_id is not empty
+                                    if openwebui_file_id not in all_active_files_map:
+                                        all_active_files_map[openwebui_file_id] = []
+                                    if chat_id_of_mapping_file not in all_active_files_map[openwebui_file_id]:
+                                        all_active_files_map[openwebui_file_id].append(chat_id_of_mapping_file)
+                    except json.JSONDecodeError:
+                        log.error(f"JSON decode error for mapping file: {mapping_file_path}")
+                    except Exception as e:
+                        log.error(f"Error reading or processing mapping file {mapping_file_path}: {e}")
             
-        Returns:
-            dict: Résultats de l'opération
+        log.info(f"Built active files mapping: {len(all_active_files_map)} unique OpenWebUI file IDs are used by active chats.")
+        return all_active_files_map
+
+    def delete_openwebui_files_for_chat(self, chat_id_to_clean: str) -> dict:
         """
-        if not chat_id:
-            log.warning("Tentative de suppression des fichiers sans ID de chat")
-            return {"status": "error", "message": "ID de chat non spécifié", "deleted_count": 0}
+        Deletes OpenWebUI files associated with a specific chat_id_to_clean.
+        Crucially, it first checks if those files are used by *other currently active* conversations.
+        """
+        if not chat_id_to_clean:
+            log.warning("Attempted to delete OpenWebUI files for an unspecified chat_id.")
+            return {"status": "error", "message": "Chat ID not specified", "deleted_count": 0}
             
-        log.info(f"Suppression des fichiers OpenWebUI pour le chat: {chat_id}")
+        log.info(f"Initiating OpenWebUI file deletion process for chat_id: {chat_id_to_clean}")
         
-        # D'abord, obtenir tous les fichiers utilisés par des conversations actives
-        active_files_mapping = self.get_all_active_files_mapping()
+        # 1. Get a map of ALL OpenWebUI file_ids currently used by ANY active conversation.
+        #    Format: {openwebui_file_id: [list_of_active_chat_ids_using_this_file]}
+        all_currently_active_files_map = self.get_all_active_files_mapping()
         
-        # Charger le mapping pour ce chat
-        mapping_file = os.path.join(MAPPINGS_FOLDER, f"{chat_id}_file_mappings.json")
+        # 2. Get the file_ids specifically mapped for the chat_id_to_clean.
+        mappings_dir = acra_config.mappings_folder
+        mapping_file_for_chat_to_clean = os.path.join(mappings_dir, f"{chat_id_to_clean}_file_mappings.json")
+        
+        openwebui_file_ids_for_this_chat: List[str] = []
+        if os.path.exists(mapping_file_for_chat_to_clean):
+            try:
+                with open(mapping_file_for_chat_to_clean, 'r') as f:
+                    # Stored mapping: {local_abs_path: openwebui_file_id}
+                    mappings = json.load(f)
+                    openwebui_file_ids_for_this_chat = list(set(m_id for m_id in mappings.values() if m_id)) # Unique, non-empty IDs
+                log.info(f"Found {len(openwebui_file_ids_for_this_chat)} OpenWebUI file IDs mapped for chat {chat_id_to_clean}: {openwebui_file_ids_for_this_chat}")
+            except Exception as e:
+                log.error(f"Error reading mapping file {mapping_file_for_chat_to_clean}: {e}")
+                # If mapping can't be read, we can't safely determine files to delete for this chat.
+                return {"status": "error", "message": f"Could not read mapping file for {chat_id_to_clean}", "deleted_count": 0}
+        else:
+            log.info(f"No mapping file found for chat {chat_id_to_clean}. No OpenWebUI files to delete based on its direct mappings.")
+            
         deleted_count = 0
         failed_count = 0
-        skipped_count = 0
-        file_ids = []
+        skipped_due_to_active_use_elsewhere = 0
         
-        try:
-            # Vérifier si le fichier de mapping existe
-            if os.path.exists(mapping_file):
-                log.info(f"Fichier de mapping trouvé: {mapping_file}")
-                try:
-                    with open(mapping_file, 'r') as f:
-                        mappings = json.load(f)
-                    
-                    # Extraire tous les IDs de fichiers du mapping
-                    file_ids = list(set(mappings.values()))
-                    log.info(f"Trouvé {len(file_ids)} fichiers potentiels à supprimer: {file_ids}")
-                    
-                    # Supprimer les fichiers qui ne sont pas utilisés par d'autres conversations
-                    for file_id in file_ids:
-                        # Si le fichier est utilisé par d'autres conversations que celle-ci
-                        if file_id in active_files_mapping and len(active_files_mapping[file_id]) > 1:
-                            other_chats = [c for c in active_files_mapping[file_id] if c != chat_id]
-                            if other_chats:
-                                log.info(f"Le fichier {file_id} est utilisé par d'autres conversations actives: {other_chats}. Ignoré.")
-                                skipped_count += 1
-                                continue
-                        
-                        # Le fichier n'est pas utilisé par d'autres conversations actives
-                        if self.delete_file_from_openwebui(file_id):
-                            deleted_count += 1
-                        else:
-                            failed_count += 1
-                except json.JSONDecodeError as e:
-                    log.error(f"Erreur de décodage du fichier mapping {mapping_file}: {str(e)}")
-                    return {"status": "error", "message": f"Erreur de décodage JSON: {str(e)}", "deleted_count": 0}
+        for file_id_to_potentially_delete in openwebui_file_ids_for_this_chat:
+            is_used_by_other_active_chats = False
+            if file_id_to_potentially_delete in all_currently_active_files_map:
+                chats_using_this_file = all_currently_active_files_map[file_id_to_potentially_delete]
+                # Is it used by any chat OTHER than the one we are currently cleaning?
+                if any(active_chat_id != chat_id_to_clean for active_chat_id in chats_using_this_file):
+                    is_used_by_other_active_chats = True
+                    other_users = [ch_id for ch_id in chats_using_this_file if ch_id != chat_id_to_clean]
+                    log.info(f"OpenWebUI file {file_id_to_potentially_delete} (from chat {chat_id_to_clean}) is ALSO used by other active chat(s): {other_users}. Skipping deletion.")
+            
+            if is_used_by_other_active_chats:
+                skipped_due_to_active_use_elsewhere += 1
             else:
-                log.info(f"Aucun fichier de mapping trouvé pour le chat {chat_id}")
-            
-            # AJOUT: Suppression directe des fichiers dans le dossier uploads
-            try:
-                from services import delete_matching_files_in_openwebui
-                log.info(f"Tentative de suppression directe des fichiers dans le dossier uploads pour {chat_id}")
-                
-                # Définir les variables d'environnement pour la fonction
-                os.environ["OPENWEBUI_UPLOADS"] = "open-webui/uploads"
-                
-                # Essayer d'abord avec le chemin relatif
-                if not os.path.exists("open-webui/uploads"):
-                    # Essayer avec des chemins absolus
-                    possible_paths = [
-                        os.path.abspath("./open-webui/uploads"),
-                        os.path.abspath("../open-webui/uploads"),
-                        os.path.abspath("/open-webui/uploads"),
-                        os.path.join(os.getcwd(), "open-webui/uploads")
-                    ]
-                    
-                    for path in possible_paths:
-                        log.info(f"Tentative avec le chemin: {path}")
-                        if os.path.exists(path):
-                            os.environ["OPENWEBUI_UPLOADS"] = path
-                            log.info(f"Dossier uploads trouvé à: {path}")
-                            break
-                    else:
-                        log.warning(f"Le dossier open-webui/uploads n'existe pas dans aucun des chemins essayés.")
-                        log.info(f"Répertoire courant: {os.getcwd()}")
-                        log.info(f"Contenu du répertoire courant: {os.listdir('.')}")
-                
-                # Appeler directement la fonction
-                deleted_files = delete_matching_files_in_openwebui(chat_id)
-                if deleted_files:
-                    log.info(f"Suppression directe réussie: {len(deleted_files)} fichiers supprimés")
-                    log.info(f"Fichiers supprimés: {deleted_files}")
-                    deleted_count += len(deleted_files)
+                # Safe to delete this OpenWebUI file ID
+                log.info(f"Attempting deletion of OpenWebUI file {file_id_to_potentially_delete} (associated with chat {chat_id_to_clean}, not used by other active chats).")
+                if self.delete_file_from_openwebui(file_id_to_potentially_delete): # No active_files_mapping passed here
+                    deleted_count += 1
                 else:
-                    log.warning("Aucun fichier n'a pu être supprimé directement")
-            except Exception as e:
-                log.error(f"Erreur lors de la suppression directe des fichiers: {str(e)}")
-        except Exception as e:
-            log.error(f"Erreur lors de la suppression des fichiers OpenWebUI pour le chat {chat_id}: {str(e)}")
-            return {
-                "status": "error", 
-                "message": f"Erreur: {str(e)}", 
-                "deleted_count": deleted_count,
-                "failed_count": failed_count,
-                "skipped_count": skipped_count
-            }
-            
+                    failed_count += 1
+        
+        result_message = (
+            f"OpenWebUI file cleanup for chat {chat_id_to_clean}: "
+            f"{deleted_count} deleted, "
+            f"{skipped_due_to_active_use_elsewhere} skipped (used by other active chats), "
+            f"{failed_count} failed."
+        )
+        log.info(result_message)
+        
         return {
-            "status": "success",
-            "message": f"Supprimé {deleted_count} fichiers, {skipped_count} fichiers ignorés car encore utilisés, échec pour {failed_count} fichiers",
-            "deleted_count": deleted_count,
-            "failed_count": failed_count,
-            "skipped_count": skipped_count,
-            "file_ids": file_ids
+            "status": "success" if failed_count == 0 else "partial_error",
+            "message": result_message,
+                "deleted_count": deleted_count,
+            "skipped_count": skipped_due_to_active_use_elsewhere,
+                "failed_count": failed_count,
+            "inspected_file_ids_from_chat_mapping": openwebui_file_ids_for_this_chat
         }
+
+    def pipe(self, body: dict, user_message: str, model_id: str, messages: List[dict]) -> Generator[str, None, None]:
+        """
+        Main pipeline processing method.
+        Handles commands via CommandHandler and streams LLM responses via ModelManager.
+        """
+        message_lower = user_message.lower()
+        __event_emitter__ = body.get("__event_emitter__") 
+
+        handled_by_confirmation, conf_response = self.command_handler.handle_confirmation(message_lower)
+        if handled_by_confirmation:
+            log.info(f"Request handled by confirmation: {conf_response}")
+            yield f"data: {json.dumps({'choices': [{'message': {'content': conf_response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.command_handler.last_response = conf_response # Update CH's last_response
+            return
+
+        # 2. Handle Specific Commands (delegated to CommandHandler)
+        command_response_str = None
+        if "/summarize" in message_lower:
+            command_response_str = self.command_handler.handle_summarize_command(user_message) 
+        elif "/structure" in message_lower:
+            command_response_str = self.command_handler.handle_structure_command()
+        elif "/generate" in message_lower:
+            command_response_str = self.command_handler.handle_generate_command(user_message)
+        elif "/clear" in message_lower:
+            command_response_str = self.command_handler.handle_clear_command(user_message)
+        elif "/merge" in message_lower:
+            command_response_str = self.command_handler.handle_merge_command()
+        elif "/regroup" in message_lower: 
+            command_response_str = self.command_handler.handle_regroup_command() 
+        
+        if command_response_str is not None:
+            log.info(f"Command handled: {command_response_str[:200]}...") # Log truncated response
+            if __event_emitter__: __event_emitter__({"type": "content", "content": command_response_str})
+            yield f"data: {json.dumps({'choices': [{'message': {'content': command_response_str}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.command_handler.last_response = command_response_str
+            return
+
+        # 3. Default LLM interaction if no command handled
+        final_user_message_for_llm = user_message
+        if not user_message.strip(): # If user sends empty message
+            # Show available commands if no user message (or default greeting)
+            available_commands_response = self.command_handler.get_available_commands()
+            log.info("Empty user message, providing available commands.")
+            yield f"data: {json.dumps({'choices': [{'message': {'content': available_commands_response}}]})}\n\n"
+            yield f"data: {json.dumps({'choices': [{'finish_reason': 'stop'}]})}\n\n"
+            self.command_handler.last_response = available_commands_response
+            return
+        
+        if self.command_handler.last_response:
+             final_user_message_for_llm += f"\n\n*Previous assistant response for context:* {self.command_handler.last_response}"
+        
+        # Always prepend the main system_prompt (which includes file analysis if any)
+        full_prompt_for_llm = self.system_prompt + "\n\n" + final_user_message_for_llm
+        log.info(f"Streaming LLM response for prompt (truncated): {full_prompt_for_llm[:300]}...")
+
+        cumulative_content = ""
+        try:
+            yield f"data: {json.dumps({'choices': [{'delta': {'role': 'assistant'}}]})}\n\n" # Start stream
+
+            # Use ModelManager for streaming
+            for chunk_content in model_manager.stream_response(full_prompt_for_llm):
+                cumulative_content += chunk_content
+                if __event_emitter__:
+                    __event_emitter__(({"type": "content_delta", "delta": chunk_content}))
+                
+                delta_res = {"choices": [{"delta": {"content": chunk_content}}]}
+                yield f"data: {json.dumps(delta_res)}\n\n"
+
+            yield f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+            yield f"data: [DONE]\n\n"
+
+        except Exception as e:
+            error_message = f"Erreur lors du streaming de la réponse LLM: {str(e)}"
+            log.error(error_message, exc_info=True)
+            if __event_emitter__: __event_emitter__({"type": "error", "error": error_message})
+            yield f"data: {json.dumps({'error': error_message})}\n\n"
+            yield f"data: [DONE]\n\n"
+            return
+
+        self.command_handler.last_response = cumulative_content # Update last response with LLM output
 
 pipeline = Pipeline()
 
 if __name__ == "__main__":
-    summarize_ppt("1040706a-776f-4233-b823-b49658dc42dd")
+    pass # Placeholder for __main__ block
