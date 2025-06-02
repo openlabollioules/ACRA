@@ -1,95 +1,136 @@
 import os
 from dotenv import load_dotenv
 import sys
+from typing import Optional, Dict, Any # Added for type hinting
+import datetime
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from services import update_table_with_project_data
-from analist import  analyze_presentation_with_colors, extract_projects_from_presentation
+from analist import analyze_presentation_with_colors, extract_projects_from_presentation
 from .extract_and_summarize import aggregate_and_summarize, Generate_pptx_from_text
 
 load_dotenv()
+# Ensure UPLOAD_FOLDER and OUTPUT_FOLDER are absolute paths for consistency
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")) # Assuming backend.py is in src/core
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
-OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
+if not os.path.isabs(UPLOAD_FOLDER):
+    UPLOAD_FOLDER = os.path.join(BASE_DIR, UPLOAD_FOLDER)
 
-def summarize_ppt(folder_name : str, add_info : str = None, timestamp : str = None):
-        """
-    Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
-    The PowerPoint will be structured with a hierarchical format:
-      - Main projects as headers
-      - Subprojects under each main project
-      - Information, alerts for each subproject
-      - Events listed by service at the bottom
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
+if not os.path.isabs(OUTPUT_FOLDER):
+    OUTPUT_FOLDER = os.path.join(BASE_DIR, OUTPUT_FOLDER)
+
+def summarize_ppt(chat_id: str, add_info: Optional[str] = None, timestamp: Optional[str] = None, raw_structure_data: Optional[Dict[str, Any]] = None):
+    """
+    Summarizes content from PowerPoint files for a given chat_id or uses provided raw_structure_data.
+    Then, updates a template PowerPoint file with this summarized data.
 
     Args:
-        folder_name (str): The name of the folder containing PowerPoint files to analyze.
-        add_info (str, optional): Additional information to include in the summary.
-        timestamp (str, optional): Timestamp to use in the filename for uniqueness. If None, will use the current time.
+        chat_id (str): The identifier for the conversation (previously folder_name).
+        add_info (str, optional): Additional information to include in the summary prompt.
+        timestamp (str, optional): Timestamp for unique filenames. Auto-generated if None.
+        raw_structure_data (dict, optional): Pre-extracted project structure. If provided, file aggregation is skipped by aggregate_and_summarize.
 
     Returns:
-        dict: A dictionary containing the download URL of the updated PowerPoint file.
+        dict: Contains the filename and path to the summarized PowerPoint file, or an error structure.
     """
-    # Determine the target folder
-        target_folder = UPLOAD_FOLDER
-        if folder_name:
-            target_folder = os.path.join(UPLOAD_FOLDER, folder_name)
-        
-        # Ensure the upload directory exists
-        os.makedirs(target_folder, exist_ok=True)
-        
-        print(f"Starting summarization for folder: {target_folder}")
-        
-        # List files in folder for diagnostics
-        files_in_folder = os.listdir(target_folder)
-        pptx_files = [f for f in files_in_folder if f.lower().endswith(".pptx")]
-        print(f"Found {len(pptx_files)} PPTX files in folder: {pptx_files}")
-        
-        if not pptx_files:
-            raise Exception(f"Aucun fichier PowerPoint (.pptx) trouvé dans le dossier {folder_name}.")
-        
-        # Récupérer les données des projets à partir de get_slide_structure
-        structure_result = aggregate_and_summarize(folder_name, add_info)
-        project_data = structure_result.get("projects", {})
-        upcoming_events = structure_result.get("upcoming_events", {})
-        errors = structure_result.get("metadata", {}).get("errors", [])
-        
-        # Print diagnostic information
-        print(f"Project data contains {len(project_data)} top-level projects")
-        print(f"Upcoming events contains data for {len(upcoming_events)} services")
-        
-        # Check if we have any data to show
-        if not project_data or len(project_data) == 0:
-            error_message = "Aucune information n'a pu être extraite des fichiers PowerPoint dans ce dossier."
-            if errors:
-                error_message += f" Erreurs rencontrées: {'; '.join(errors)}"
-            print(f"ERROR: {error_message}")
-            raise Exception(error_message)
-        
-        # Create output directory for this folder
-        folder_output_path = os.path.join(OUTPUT_FOLDER, folder_name)
-        os.makedirs(folder_output_path, exist_ok=True)
-        
-        # Generate timestamp if not provided
-        if timestamp is None:
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Set the output filename directly in the subfolder, including timestamp
-        output_filename = os.path.join(folder_output_path, f"{folder_name}_summary_{timestamp}.pptx")
-        
-        print(f"Creating summary PowerPoint at: {output_filename}")
-        
-        # Update the template with the project data using the new format
-        summarized_file_path = update_table_with_project_data(
-            pptx_path=os.getenv("TEMPLATE_FILE", "templates/CRA_TEMPLATE_IA.pptx"),  # Template file 
-            slide_index=0,  # first slide
-            table_shape_index=0,  # index of the table
-            project_data=project_data,
-            output_path=output_filename,
-            upcoming_events=upcoming_events  # Pass upcoming events by service
-        )
+    
+    # The core logic of file iteration is now inside aggregate_and_summarize if raw_structure_data is None.
+    # Here, we directly call aggregate_and_summarize, passing all relevant parameters.
+    print(f"Starting summarization for chat_id: {chat_id}")
+    if raw_structure_data:
+        print("summarize_ppt received raw_structure_data, will pass to aggregate_and_summarize.")
 
-        # Return the download URL
-        filename = os.path.basename(summarized_file_path)
-        return {"filename": filename, "summary": summarized_file_path}
+    # Call the updated aggregate_and_summarize function from extract_and_summarize.py
+    # It handles using raw_structure_data or processing files from chat_id's folder.
+    summarized_json_structure = aggregate_and_summarize(
+        chat_id=chat_id, 
+        add_info=add_info,
+        timestamp=timestamp, # Pass timestamp along, though aggregate_and_summarize might not use it for logic
+        raw_structure_data=raw_structure_data
+    )
+
+    # Validate the structure returned by aggregate_and_summarize
+    if not isinstance(summarized_json_structure, dict) or "projects" not in summarized_json_structure:
+        error_detail = summarized_json_structure.get("error", "Invalid structure from summarization") if isinstance(summarized_json_structure, dict) else "Unexpected response from summarization"
+        log_message = f"ERROR: {error_detail} for chat_id {chat_id}."
+        if isinstance(summarized_json_structure, dict) and summarized_json_structure.get("metadata", {}).get("errors"):
+            log_message += f" Details: {summarized_json_structure['metadata']['errors']}"
+        print(log_message)
+        # Return an error structure compatible with CommandHandler expectations
+        return {"error": log_message, "summary": None} 
+
+    # Extract necessary data for PowerPoint generation
+    project_data_for_pptx = summarized_json_structure.get("projects", {})
+    upcoming_events_for_pptx = summarized_json_structure.get("upcoming_events", {})
+    
+    # Check if we have any actual data to put in the PowerPoint
+    # The LLM might return an empty "projects" dict if it couldn't summarize anything meaningful.
+    if not project_data_for_pptx and not upcoming_events_for_pptx: # If both are empty
+        # Check if there were errors during the summarization process itself that didn't prevent a dict return
+        metadata_errors = summarized_json_structure.get("metadata", {}).get("errors", [])
+        source_file_errors = [sf.get("error") for sf in summarized_json_structure.get("source_files", []) if sf.get("error")]
+        all_errors = metadata_errors + source_file_errors
+
+        if all_errors:
+            error_message = f"No project data to populate PowerPoint for chat {chat_id}. Errors encountered: {'; '.join(all_errors)}"
+        else:
+            # This case means aggregate_and_summarize ran, LLM ran, but LLM returned empty projects/events.
+            # This might be valid if input files were empty or LLM deemed nothing summarizable.
+            error_message = f"No summarizable project data or upcoming events found to populate PowerPoint for chat {chat_id}. The input might have been empty or non-relevant."
+        
+        print(f"WARNING: {error_message}")
+        # We can still generate a blank or template-based PPTX, but it will be mostly empty.
+        # Or, decide to return an error if an empty summary is not useful.
+        # For now, let's proceed to generate a potentially empty PPTX but log the warning.
+        # If an error should be returned, use: return {"error": error_message, "summary": None}
+
+    # --- PowerPoint Generation --- # 
+    # Create output directory for this chat_id if it doesn't exist
+    # The output will be in OUTPUT_FOLDER/{chat_id}/summaries/
+    chat_summary_output_dir = os.path.join(OUTPUT_FOLDER, chat_id, "summaries") # Specific subdirectory for summaries
+    os.makedirs(chat_summary_output_dir, exist_ok=True)
+    
+    # Generate timestamp if not provided by caller (e.g. CommandHandler)
+    current_timestamp = timestamp if timestamp else datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    output_filename = os.path.join(chat_summary_output_dir, f"summary_{chat_id}_{current_timestamp}.pptx")
+    
+    print(f"Creating summary PowerPoint at: {output_filename} for chat_id: {chat_id}")
+    
+    template_path = os.getenv("TEMPLATE_FILE", "templates/CRA_TEMPLATE_IA.pptx")
+    if not os.path.isabs(template_path):
+        template_path = os.path.join(BASE_DIR, template_path)
+
+    if not os.path.exists(template_path):
+        print(f"WARNING: Template file not found at {template_path}. update_table_with_project_data might fail or use a default.")
+        # update_table_with_project_data should ideally handle template absence gracefully or take a Presentation object.
+
+    # Call update_table_with_project_data to create/update the PowerPoint
+    # This function is expected to handle template presence/absence and save to output_filename.
+    try:
+        final_ppt_path = update_table_with_project_data(
+            pptx_path=template_path, 
+            slide_index=0,      # Assuming first slide
+            table_shape_index=0,      # Assuming first table on that slide
+            project_data=project_data_for_pptx,
+            output_path=output_filename,
+            upcoming_events=upcoming_events_for_pptx
+        )
+        if "error" in final_ppt_path.lower(): # If update_table_with_project_data returns an error string
+            print(f"Error from update_table_with_project_data for chat {chat_id}: {final_ppt_path}")
+            return {"error": f"PPTX generation failed: {final_ppt_path}", "summary": None}
+
+        created_filename = os.path.basename(final_ppt_path)
+        print(f"Successfully created summary PowerPoint: {final_ppt_path} for chat_id: {chat_id}")
+        return {"filename": created_filename, "summary": final_ppt_path} # Return path for upload
+
+    except Exception as e:
+        error_msg = f"Exception during PowerPoint generation for chat {chat_id}: {str(e)}"
+        print(f"ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+        return {"error": error_msg, "summary": None}
 
 def get_slide_structure(foldername : str):
     # Check if foldername is None

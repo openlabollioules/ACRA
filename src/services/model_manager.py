@@ -158,6 +158,7 @@ class ModelManager:
         1. Regroupe les projets qui ont des noms similaires (ex: "NU" et "NU Gate" font partie du même groupe)
         2. Regroupe les projets qui ont des parties communes (ex: "NU" et "NU_MAX" font partie du même groupe)
         3. Deux projets qui ont le même noms mais avec des majuscules ou non ou des caractères spéciaux font partie du même groupe, prend les aussi en compte
+        (ex: Autres et <Autres> font partie du même groupe, ou encore Autres et autres, ou bien Autre et AUTRES)
         
         RÉPONSE: Renvoie UNIQUEMENT une liste JSON de listes, où chaque sous-liste contient les noms des projets à regrouper ensemble.
         Si un projet n'a pas de similaire, ne l'inclus pas dans la réponse.

@@ -5,13 +5,18 @@ Centralized command processing for the pipeline
 import os
 import json
 import datetime
-from typing import Dict, Any, Generator, List, Tuple
+from typing import Dict, Any, Generator, List, Tuple, Optional
 from OLLibrary.utils.log_service import get_logger
 from OLLibrary.utils.json_service import extract_json
 from config_pipeline import acra_config
 from .file_manager import FileManager
 from .model_manager import model_manager
 from .cleanup_service import cleanup_orphaned_folders
+
+# Imports for PowerPoint generation (potentially move to a dedicated service later)
+from pptx import Presentation
+from pptx.util import Pt, Inches
+from src.services.update_pttx_service import update_table_with_project_data
 
 log = get_logger(__name__)
 
@@ -23,18 +28,19 @@ class CommandHandler:
     
     def __init__(self, file_manager: FileManager):
         self.file_manager = file_manager
-        self.cached_structure = None
+        self.cached_structure: Optional[Dict[str, Any]] = None
         self.waiting_for_confirmation = False
         self.confirmation_command = ""
-        self.confirmation_additional_info = ""
-        self.last_response = None
+        self.confirmation_additional_info: Optional[str] = None
+        self.last_response: Optional[str] = None
+        self.system_prompt: str = ""
     
     def reset_state(self):
         """Reset command handler state"""
         self.cached_structure = None
         self.waiting_for_confirmation = False
         self.confirmation_command = ""
-        self.confirmation_additional_info = ""
+        self.confirmation_additional_info = None
         self.last_response = None
     
     def get_available_commands(self) -> str:
@@ -103,53 +109,202 @@ class CommandHandler:
             # No existing summaries, generate one directly
             return self._execute_summarize(additional_info)
     
-    def _execute_summarize(self, additional_info: str = None) -> str:
-        """Execute the summarize operation"""
+    def _generate_summary_powerpoint(self, summarized_structure: Dict[str, Any], timestamp: str) -> str:
+        """
+        Generates a PowerPoint presentation from a summarized JSON structure.
+
+        Args:
+            summarized_structure (Dict[str, Any]): The LLM-summarized project data.
+            timestamp (str): Timestamp for generating a unique filename.
+
+        Returns:
+            str: Absolute path to the generated PowerPoint file, or an error string.
+        """
         try:
-            # Import here to avoid circular imports
+            chat_id = self.file_manager.chat_id
+            if not chat_id:
+                log.error("Cannot generate summary PowerPoint without chat_id.")
+                return "error: Chat ID not set for summary generation."
+
+            # Define output directory for summaries within the chat_id's output folder
+            summary_output_dir = os.path.join(acra_config.get_conversation_output_folder(chat_id), "summaries")
+            os.makedirs(summary_output_dir, exist_ok=True)
+
+            output_filename = f"summary_{timestamp}.pptx"
+            output_filepath = os.path.join(summary_output_dir, output_filename)
+            temp_filepath = os.path.join(summary_output_dir, f"temp_summary_{timestamp}.pptx")
+
+            log.info(f"Generating summary PowerPoint at: {output_filepath}")
+
+            # Create presentation: Use template if available, otherwise a blank one
+            if acra_config.template_path and os.path.exists(acra_config.template_path):
+                log.info(f"Using template: {acra_config.template_path}")
+                prs = Presentation(acra_config.template_path)
+                # Ensure the template has at least one slide and a table placeholder, or adapt as needed.
+                # This example assumes the first slide and first shape (if a table) is the target.
+                # More robust template handling might be needed (e.g., named placeholders).
+                if not prs.slides:
+                    log.warning("Template has no slides. Adding a blank slide.")
+                    prs.slides.add_slide(prs.slide_layouts[5]) # Fallback to a blank slide layout
+            else:
+                log.info("No valid template found or specified. Creating a blank presentation.")
+                prs = Presentation()
+                # Add a blank slide (layout 5 is typically blank)
+                slide_layout = prs.slide_layouts[5]
+                slide = prs.slides.add_slide(slide_layout)
+                # Add a table placeholder - dimensions might need adjustment
+                left = top = Inches(1.0)
+                width = Inches(8.0)
+                height = Inches(5.5)
+                # Add a table with a default size, update_table_with_project_data should handle actual content
+                # The row/col count here is a placeholder; update_table_with_project_data will manage it.
+                slide.shapes.add_table(2, 2, left, top, width, height) 
+
+            prs.save(temp_filepath) # Save initial state (template or blank with table)
+
+            # Extract projects and upcoming_events for update_table_with_project_data
+            projects_data = summarized_structure.get("projects", {})
+            upcoming_events_data = summarized_structure.get("upcoming_events", {})
+
+            # Call update_table_with_project_data to populate the presentation
+            # Assuming slide_index=0 and table_index=0 for simplicity.
+            # This might need to be more dynamic if templates have specific structures.
+            final_pptx_path = update_table_with_project_data(
+                pptx_path=temp_filepath, 
+                slide_index=0, 
+                table_shape_index=0, 
+                project_data=projects_data,
+                output_path=output_filepath, # Final desired output path
+                upcoming_events=upcoming_events_data
+            )
+
+            if os.path.exists(temp_filepath):
+                os.remove(temp_filepath)
+
+            if "error" in final_pptx_path.lower(): # Check if update_table_with_project_data returned an error string
+                 log.error(f"Error from update_table_with_project_data: {final_pptx_path}")
+                 return f"error: Failed to update PowerPoint table - {final_pptx_path}"
+            
+            log.info(f"Summary PowerPoint generated successfully: {final_pptx_path}")
+            return final_pptx_path # Should be the same as output_filepath if successful
+
+        except Exception as e:
+            log.error(f"Error in _generate_summary_powerpoint: {str(e)}", exc_info=True)
+            if os.path.exists(temp_filepath):
+                try: os.remove(temp_filepath) # Clean up temp file on error
+                except: pass
+            return f"error: Exception generating summary PowerPoint - {str(e)}"
+
+    def _execute_summarize(self, additional_info: Optional[str] = None) -> str:
+        """Execute the summarize operation, creating a new summary PPTX."""
+        try:
             from core import summarize_ppt
             
-            # Generate timestamp for unique filename
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+            chat_id = self.file_manager.chat_id
+
+            if not chat_id:
+                log.error("Chat ID not set. Cannot execute summarize.")
+                return "Erreur: Chat ID non défini."
+
+            generated_pptx_path: Optional[str] = None # To store the path of the generated PPTX
+
             if acra_config.get("USE_API"):
-                # Use API endpoint
+                log.info(f"Using API to get summarized structure for chat {chat_id}")
                 import requests
-                endpoint = f"acra/{self.file_manager.chat_id}"
-                if additional_info:
-                    endpoint += f"?add_info={additional_info}&timestamp={timestamp}"
-                else:
-                    endpoint += f"?timestamp={timestamp}"
+                endpoint = f"acra/{chat_id}/summarize_structure"
+                
+                # Prepare JSON payload for the API
+                api_payload = {"timestamp": timestamp}
+                if additional_info: 
+                    api_payload["add_info"] = additional_info
                 
                 url = f"{acra_config.get('API_URL')}/{endpoint}"
-                response = requests.get(url)
-                result = response.json() if response.status_code == 200 else {"error": "Request failed"}
-            else:
-                # Use direct function call
-                result = summarize_ppt(self.file_manager.chat_id, additional_info, timestamp)
+                response = requests.post(url, json=api_payload) # Original uses POST with JSON payload
+                
+                if response.status_code == 200:
+                    summarized_json_data = response.json() # Expecting JSON project structure
+                    if "error" in summarized_json_data and summarized_json_data["error"]:
+                        log.error(f"API summarization error for chat {chat_id}: {summarized_json_data['error']}")
+                        return f"Erreur de l'API lors de la récupération de la structure résumée: {summarized_json_data['error']}"
+                    
+                    if "projects" not in summarized_json_data: # Validate API response
+                        log.error(f"API response for chat {chat_id} missing 'projects' key. Response: {summarized_json_data}")
+                        return f"Réponse invalide de l'API: la clé 'projects' est manquante."
+
+                    # Generate PPTX using the JSON data obtained from API
+                    temp_pptx_path_or_error = self._generate_summary_powerpoint(summarized_json_data, timestamp)
+                    
+                    if "error:" in temp_pptx_path_or_error.lower(): # _generate_summary_powerpoint signals error with "error:" prefix
+                        log.error(f"Failed to generate summary PPTX from API data for chat {chat_id}: {temp_pptx_path_or_error}")
+                        return f"Erreur lors de la création du fichier PowerPoint de résumé: {temp_pptx_path_or_error.split('error:', 1)[-1].strip()}"
+                    generated_pptx_path = temp_pptx_path_or_error
+                else:
+                    log.error(f"API call for summarized structure failed for chat {chat_id}: {response.status_code} - {response.text}")
+                    return f"Erreur API ({response.status_code}) lors de la récupération de la structure résumée."
             
-            if "error" in result:
-                return f"Erreur lors de la génération du résumé: {result['error']}"
+            else: # Not using API
+                log.info(f"Using direct call to summarize and generate PPTX for chat {chat_id}")
+                raw_input_structure_for_llm: Optional[Dict[str, Any]] = None
+                if self.cached_structure and isinstance(self.cached_structure, dict) and self.cached_structure.get("projects") is not None:
+                    log.info(f"Using cached_structure for summarization for chat {chat_id}")
+                    raw_input_structure_for_llm = self.cached_structure
+                else:
+                    log.info(f"No valid cached_structure found for chat {chat_id}. Summarize will process files.")
+                
+                result_from_core_summarize_ppt = summarize_ppt(
+                    chat_id=chat_id, 
+                    add_info=additional_info, 
+                    timestamp=timestamp,
+                    raw_structure_data=raw_input_structure_for_llm
+                )
+                
+                # Handle possible error from summarize_ppt
+                if "error" in result_from_core_summarize_ppt and result_from_core_summarize_ppt["error"]:
+                    error_message = result_from_core_summarize_ppt["error"]
+                    log.error(f"Error from summarize_ppt for chat {chat_id}: {error_message}")
+                    return f"Erreur lors de la génération du résumé: {error_message}"
+                
+                # summarize_ppt has already generated the PPTX file, so we just need the path
+                if "summary" not in result_from_core_summarize_ppt:
+                    log.error(f"summarize_ppt didn't return a 'summary' key with file path: {result_from_core_summarize_ppt}")
+                    return "Erreur: Le service de résumé n'a pas fourni le chemin du fichier généré."
+                
+                # The path to the already generated PPTX is in the "summary" key
+                generated_pptx_path = result_from_core_summarize_ppt["summary"]
             
-            # Upload result and get download URL
-            upload_result = self.file_manager.upload_to_openwebui(result["summary"])
+            if not generated_pptx_path:
+                log.critical(f"Unexpectedly reached common logic with no generated_pptx_path for chat {chat_id}. This indicates a flaw in prior error trapping.")
+                return "Erreur critique: Le chemin du fichier PowerPoint n'a pas été obtenu et l'erreur n'a pas été interceptée plus tôt."
+
+            upload_result = self.file_manager.upload_to_openwebui(generated_pptx_path)
             
             if "error" in upload_result:
-                return f"Résumé généré mais erreur lors du téléchargement: {upload_result['error']}"
+                log.error(f"Résumé PPTX généré ({generated_pptx_path}) mais erreur d'upload pour chat {chat_id}: {upload_result['error']}")
+                generated_filename = os.path.basename(generated_pptx_path) if generated_pptx_path else "inconnu"
+                return f"Résumé généré ({generated_filename}) mais erreur lors du téléchargement vers OpenWebUI: {upload_result['error']}"
             
-            # Generate introduction if we have system prompt
-            if hasattr(self, 'system_prompt') and self.system_prompt:
-                introduction = model_manager.generate_introduction(self.system_prompt)
-                response = f"{introduction}\n\n Le résumé de tous les fichiers a été généré avec succès.\n\n  ### URL de téléchargement: \n{upload_result.get('download_url', 'Non disponible')}"
-            else:
-                response = f"Le résumé de tous les fichiers a été généré avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
+            response_message_parts = []
+            if self.system_prompt:
+                try:
+                    introduction = model_manager.generate_introduction(self.system_prompt)
+                    response_message_parts.append(introduction)
+                except Exception as intro_e:
+                    log.warning(f"Could not generate introduction for chat {chat_id}: {intro_e}")
+            
+            generated_filename_for_msg = os.path.basename(generated_pptx_path) if generated_pptx_path else "résumé"
+            response_message_parts.append(f"Le résumé ({generated_filename_for_msg}) a été généré avec succès.")
+            response_message_parts.append(f"### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}")
+            
+            final_response = "\n\n".join(response_message_parts)
             
             self.file_manager.save_file_mappings()
-            return response
+            return final_response
             
         except Exception as e:
-            log.error(f"Error executing summarize: {str(e)}")
-            return f"Erreur lors de la génération du résumé: {str(e)}"
+            current_chat_id = self.file_manager.chat_id if hasattr(self, 'file_manager') and self.file_manager and self.file_manager.chat_id else "UNKNOWN_CHAT_ID"
+            log.error(f"Exception in _execute_summarize for chat {current_chat_id}: {str(e)}", exc_info=True)
+            return f"Erreur majeure lors de l'exécution du résumé: {str(e)}"
     
     def handle_structure_command(self) -> str:
         """Handle /structure command"""

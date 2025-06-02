@@ -4,12 +4,17 @@ import json
 from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
 import time
+from typing import Optional, Dict, Any, List
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Load environment variables
 load_dotenv()
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
+# Ensure UPLOAD_FOLDER is absolute for consistent path resolution
+if not os.path.isabs(UPLOAD_FOLDER):
+    BASE_DIR_FOR_UPLOAD = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")) # Assuming this file is in src/core
+    UPLOAD_FOLDER = os.path.join(BASE_DIR_FOR_UPLOAD, UPLOAD_FOLDER)
 
 from langchain_ollama import OllamaLLM
 summarize_model = OllamaLLM(model="qwen3:30b-a3b", base_url="http://host.docker.internal:11434", temperature=0.7, num_ctx=132000)
@@ -86,317 +91,189 @@ def extract_common_and_upcoming_info(project_data):
     
     return result
 
-def aggregate_and_summarize(pptx_folder, add_info=None):
+def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timestamp: Optional[str] = None, raw_structure_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Main function to aggregate the IF texts from all PPTX files in the folder and obtain a summarized result.
-    Uses an LLM to summarize the project information and return it in the specified JSON format.
-    
+    Aggregates information from PPTX files or uses provided raw structure, then summarizes using an LLM.
+
     Parameters:
-      pptx_folder (str): Path to the folder containing PowerPoint files to analyze.
-      add_info (str, optional): Additional information to include in the summary.
+      chat_id (str): Identifier for the chat/conversation, used to locate files if raw_structure_data is not provided.
+      add_info (str, optional): Additional information to include in the LLM summarization prompt.
+      timestamp (str, optional): Timestamp, currently not used by this function but kept for signature consistency.
+      raw_structure_data (dict, optional): Pre-extracted project structure. If provided, file processing is skipped.
+    
     Returns:
-      dict: A nested dictionary with project/subproject structure containing information and alerts
+      dict: LLM-summarized project data in JSON format, or the raw aggregated data if summarization fails.
     """
-    # New project structure
-    aggregated_data = {}
+    final_data_for_llm: Dict[str, Any]
+    extraction_errors: List[str] = []
+    processed_files_metadata: List[Dict[str, Any]] = []
     file_count = 0
-    processed_files = []
-    extraction_errors = []
-    
-    # Determine the full path to the folder
-    full_path = pptx_folder
-    if not os.path.isabs(pptx_folder):
-        full_path = os.path.join(UPLOAD_FOLDER, pptx_folder)
-    
-    print(f"Processing folder: {full_path}")
-    
-    # Check if the folder exists
-    if not os.path.exists(full_path):
-        error_msg = f"Warning: Folder {full_path} does not exist."
-        print(error_msg)
-        extraction_errors.append(error_msg)
-        return {
-            "projects": {},
-            "upcoming_events": {},
-            "metadata": {
-                "processed_files": 0,
-                "folder": os.path.basename(pptx_folder),
-                "errors": extraction_errors
-            },
-            "source_files": []
-        }
-    
-    # List all files in the folder to diagnose issues
-    all_files = os.listdir(full_path)
-    print(f"Files in folder: {all_files}")
-    pptx_files = [f for f in all_files if f.lower().endswith(".pptx")]
-    print(f"PPTX files found: {pptx_files}")
-    
-    if not pptx_files:
-        error_msg = f"No PowerPoint files found in folder {full_path}"
-        print(error_msg)
-        extraction_errors.append(error_msg)
-        return {
-            "projects": {},
-            "upcoming_events": {},
-            "metadata": {
-                "processed_files": 0,
-                "folder": os.path.basename(pptx_folder),
-                "errors": extraction_errors
-            },
-            "source_files": []
-        }
-    
-    # Get all PPTX files in the folder
-    for filename in pptx_files:
-        file_path = os.path.join(full_path, filename)
-        print(f"Processing file: {file_path}")
+
+    # Path 1: Use provided raw_structure_data if valid
+    if raw_structure_data and isinstance(raw_structure_data, dict) and \
+       ("projects" in raw_structure_data or "upcoming_events" in raw_structure_data): # Check for essential data keys
+        print(f"Using provided raw_structure_data for chat_id: {chat_id}")
+        final_data_for_llm = json.loads(json.dumps(raw_structure_data)) # Deep copy to avoid modifying the cache
+
+        # Ensure essential keys exist and populate metadata from the raw_structure_data
+        if "projects" not in final_data_for_llm: final_data_for_llm["projects"] = {}
+        if "upcoming_events" not in final_data_for_llm: final_data_for_llm["upcoming_events"] = {}
         
-        # Extract project data from the presentation
-        try:
-            file_project_data = extract_projects_from_presentation(file_path)
-            file_count += 1
-            
-            # Add processed file info
-            service_name = os.path.basename(file_path).split('_')[-1].replace('.pptx', '')
-            processed_file_info = {
-                "filename": filename,
-                "service_name": service_name,
-                "processed": True
-            }
-            
-            # Check if any projects were extracted
-            if "projects" in file_project_data and file_project_data["projects"]:
-                print(f"Successfully extracted projects from {filename}")
-                project_count = len(file_project_data["projects"])
-                processed_file_info["project_count"] = project_count
-            else:
-                # Check for error message in metadata
-                if "metadata" in file_project_data and "error" in file_project_data["metadata"]:
-                    error = file_project_data["metadata"]["error"]
-                    print(f"Error in file {filename}: {error}")
-                    extraction_errors.append(f"File {filename}: {error}")
-                    processed_file_info["error"] = error
-                else:
-                    warning = f"No projects extracted from {filename}"
-                    print(warning)
-                    extraction_errors.append(warning)
-                    processed_file_info["warning"] = warning
-            
-            processed_files.append(processed_file_info)
-            
-            # Process projects data from file_project_data
-            if "projects" in file_project_data:
-                for main_project, main_project_content in file_project_data["projects"].items():
-                    # Ensure the main project exists in aggregated data
-                    if main_project not in aggregated_data:
-                        aggregated_data[main_project] = {}
-                    
-                    # Check if main_project_content is a terminal node or contains subprojects
-                    is_terminal = "information" in main_project_content
-                    
-                    if is_terminal:
-                        # This is a terminal node, merge the data directly
-                        if "information" in aggregated_data[main_project]:
-                            # Merge with existing data
-                            aggregated_data[main_project]["information"] += "\n" + main_project_content["information"] if aggregated_data[main_project]["information"] else main_project_content["information"]
-                            
-                            # Merge alerts and advancements
-                            for alert_type in ["critical", "small", "advancements"]:
-                                if alert_type in main_project_content:
-                                    if alert_type not in aggregated_data[main_project]:
-                                        aggregated_data[main_project][alert_type] = []
-                                    aggregated_data[main_project][alert_type].extend(
-                                        item for item in main_project_content[alert_type] 
-                                        if item not in aggregated_data[main_project][alert_type]
-                                    )
-                        else:
-                            # Copy the data for a new terminal node
-                            aggregated_data[main_project] = {
-                                "information": main_project_content.get("information", ""),
-                                "critical": main_project_content.get("critical", []),
-                                "small": main_project_content.get("small", []),
-                                "advancements": main_project_content.get("advancements", [])
-                            }
-                    else:
-                        # This contains subprojects
-                        for subproject_name, subproject_content in main_project_content.items():
-                            # Skip metadata fields that might be in the dictionary
-                            if subproject_name in ["information", "critical", "small", "advancements"]:
-                                # Handle top-level project information if it exists alongside subprojects
-                                if subproject_name == "information" and subproject_content:
-                                    if "information" not in aggregated_data[main_project]:
-                                        aggregated_data[main_project]["information"] = subproject_content
-                                    else:
-                                        aggregated_data[main_project]["information"] += "\n" + subproject_content
-                                elif subproject_name in ["critical", "small", "advancements"] and subproject_content:
-                                    if subproject_name not in aggregated_data[main_project]:
-                                        aggregated_data[main_project][subproject_name] = []
-                                    aggregated_data[main_project][subproject_name].extend(
-                                        item for item in subproject_content 
-                                        if item not in aggregated_data[main_project][subproject_name]
-                                    )
-                                continue
-                            
-                            # Process the subproject
-                            if subproject_name not in aggregated_data[main_project]:
-                                aggregated_data[main_project][subproject_name] = {}
-                            
-                            # Check if subproject_content is a terminal node or further nested
-                            sub_is_terminal = "information" in subproject_content
-                            
-                            if sub_is_terminal:
-                                # This is a terminal subproject
-                                if "information" in aggregated_data[main_project][subproject_name]:
-                                    # Merge with existing data
-                                    aggregated_data[main_project][subproject_name]["information"] += "\n" + subproject_content["information"] if aggregated_data[main_project][subproject_name]["information"] else subproject_content["information"]
-                                    
-                                    # Merge alerts and advancements
-                                    for alert_type in ["critical", "small", "advancements"]:
-                                        if alert_type in subproject_content:
-                                            if alert_type not in aggregated_data[main_project][subproject_name]:
-                                                aggregated_data[main_project][subproject_name][alert_type] = []
-                                            aggregated_data[main_project][subproject_name][alert_type].extend(
-                                                item for item in subproject_content[alert_type] 
-                                                if item not in aggregated_data[main_project][subproject_name][alert_type]
-                                            )
-                                else:
-                                    # Copy the data for a new terminal subproject
-                                    aggregated_data[main_project][subproject_name] = {
-                                        "information": subproject_content.get("information", ""),
-                                        "critical": subproject_content.get("critical", []),
-                                        "small": subproject_content.get("small", []),
-                                        "advancements": subproject_content.get("advancements", [])
-                                    }
-                            else:
-                                # This contains sub-subprojects
-                                for subsubproject_name, subsubproject_content in subproject_content.items():
-                                    # Skip metadata fields
-                                    if subsubproject_name in ["information", "critical", "small", "advancements"]:
-                                        # Handle subproject information if it exists alongside sub-subprojects
-                                        if subsubproject_name == "information" and subsubproject_content:
-                                            if "information" not in aggregated_data[main_project][subproject_name]:
-                                                aggregated_data[main_project][subproject_name]["information"] = subsubproject_content
-                                            else:
-                                                aggregated_data[main_project][subproject_name]["information"] += "\n" + subsubproject_content
-                                        elif subsubproject_name in ["critical", "small", "advancements"] and subsubproject_content:
-                                            if subsubproject_name not in aggregated_data[main_project][subproject_name]:
-                                                aggregated_data[main_project][subproject_name][subsubproject_name] = []
-                                            aggregated_data[main_project][subproject_name][subsubproject_name].extend(
-                                                item for item in subsubproject_content 
-                                                if item not in aggregated_data[main_project][subproject_name][subsubproject_name]
-                                            )
-                                        continue
-                                    
-                                    # Process the sub-subproject (assuming it's always a terminal node)
-                                    if subsubproject_name not in aggregated_data[main_project][subproject_name]:
-                                        aggregated_data[main_project][subproject_name][subsubproject_name] = {
-                                            "information": subsubproject_content.get("information", ""),
-                                            "critical": subsubproject_content.get("critical", []),
-                                            "small": subsubproject_content.get("small", []),
-                                            "advancements": subsubproject_content.get("advancements", [])
-                                        }
-                                    else:
-                                        # Merge with existing data
-                                        if "information" in subsubproject_content:
-                                            if "information" in aggregated_data[main_project][subproject_name][subsubproject_name]:
-                                                aggregated_data[main_project][subproject_name][subsubproject_name]["information"] += "\n" + subsubproject_content["information"]
-                                            else:
-                                                aggregated_data[main_project][subproject_name][subsubproject_name]["information"] = subsubproject_content["information"]
-                                        
-                                        # Merge alerts and advancements
-                                        for alert_type in ["critical", "small", "advancements"]:
-                                            if alert_type in subsubproject_content:
-                                                if alert_type not in aggregated_data[main_project][subproject_name][subsubproject_name]:
-                                                    aggregated_data[main_project][subproject_name][subsubproject_name][alert_type] = []
-                                                aggregated_data[main_project][subproject_name][subsubproject_name][alert_type].extend(
-                                                    item for item in subsubproject_content[alert_type] 
-                                                    if item not in aggregated_data[main_project][subproject_name][subsubproject_name][alert_type]
-                                                )
-            
-            # Handle upcoming events from metadata
-            if "metadata" in file_project_data and "collected_upcoming_events" in file_project_data["metadata"]:
-                # Need to know the service name to categorize events
-                service_name = os.path.basename(file_path).split('_')[-1].replace('.pptx', '')
-                events = file_project_data["metadata"]["collected_upcoming_events"]
-                
-                if events:
-                    processed_file_info["events_count"] = len(events)
-                    
-                    if "upcoming_events" not in aggregated_data:
-                        aggregated_data["upcoming_events"] = {}
-                    
-                    if service_name not in aggregated_data["upcoming_events"]:
-                        aggregated_data["upcoming_events"][service_name] = []
-                    
-                    for event in events:
-                        if event not in aggregated_data["upcoming_events"][service_name]:
-                            aggregated_data["upcoming_events"][service_name].append(event)
-                else:
-                    processed_file_info["events_count"] = 0
-        except Exception as e:
-            error_message = f"Error processing file {filename}: {str(e)}"
-            print(error_message)
-            extraction_errors.append(error_message)
-            processed_files.append({
-                "filename": filename, 
-                "processed": False,
-                "error": str(e)
-            })
-    
-    # If no projects were extracted but files were processed, that's a problem
-    if file_count > 0 and not aggregated_data:
-        print(f"WARNING: {file_count} files were processed but no project data was extracted")
-        extraction_errors.append(f"{file_count} files were processed but no project data was extracted")
-    
-    # If no files were processed, return empty data structure with error info
-    if file_count == 0:
-        error_msg = "No files were successfully processed"
-        print(error_msg)
-        extraction_errors.append(error_msg)
-        return {
-            "projects": {},
-            "upcoming_events": {},
-            "metadata": {
-                "processed_files": 0,
-                "folder": os.path.basename(pptx_folder),
-                "errors": extraction_errors
-            },
-            "source_files": processed_files
-        }
-    
-    # Prepare the data structure for return
-    result = {
-        "projects": aggregated_data.get("projects", aggregated_data),
-        "upcoming_events": aggregated_data.get("upcoming_events", {}),
-        "metadata": {
+        # Metadata handling from cache
+        cached_metadata = final_data_for_llm.get("metadata", {})
+        file_count = cached_metadata.get("processed_files", 0)
+        # If processed_files count is zero or missing, try to infer from source_files
+        if not file_count and "source_files" in final_data_for_llm and isinstance(final_data_for_llm["source_files"], list):
+            file_count = len([sf for sf in final_data_for_llm["source_files"] if isinstance(sf, dict) and sf.get("processed")])
+        
+        processed_files_metadata = final_data_for_llm.get("source_files", [])
+        # Ensure processed_files_metadata is a list of dicts
+        if not isinstance(processed_files_metadata, list) or not all(isinstance(item, dict) for item in processed_files_metadata):
+            print(f"Warning: 'source_files' in raw_structure_data for chat {chat_id} is not a list of dicts. Resetting.")
+            processed_files_metadata = [] # Reset if format is incorrect
+
+        extraction_errors = cached_metadata.get("errors", [])
+        if not isinstance(extraction_errors, list): extraction_errors = []
+
+
+        # Ensure the final metadata structure is consistent
+        final_data_for_llm["metadata"] = {
+            "folder": cached_metadata.get("folder", chat_id), # Use cached folder or current chat_id
             "processed_files": file_count,
-            "folder": os.path.basename(pptx_folder),
-            "errors": extraction_errors if extraction_errors else []
-        },
-        "source_files": processed_files
-    }
+            "errors": extraction_errors,
+        }
+        final_data_for_llm["source_files"] = processed_files_metadata
+
+    # Path 2: No valid raw_structure_data, process files from folder
+    else:
+        if raw_structure_data: # It was provided but invalid
+             print(f"Provided raw_structure_data for chat_id {chat_id} was invalid or empty. Processing files from folder.")
+        else: # It was not provided at all
+             print(f"No raw_structure_data provided for chat_id: {chat_id}. Processing files from folder.")
+
+        full_path = os.path.join(UPLOAD_FOLDER, chat_id)
+        print(f"Processing folder for file aggregation: {full_path}")
+
+        if not os.path.exists(full_path) or not os.path.isdir(full_path):
+            error_msg = f"Error: Folder {full_path} does not exist or is not a directory for chat_id {chat_id}."
+            print(error_msg)
+            extraction_errors.append(error_msg)
+            return {
+                "projects": {}, "upcoming_events": {},
+                "metadata": {"processed_files": 0, "folder": chat_id, "errors": extraction_errors},
+                "source_files": []
+            }
+        
+        all_files_in_dir = os.listdir(full_path)
+        pptx_files = [f for f in all_files_in_dir if f.lower().endswith(".pptx")]
+        print(f"PPTX files found in {full_path}: {pptx_files}")
+        
+        if not pptx_files:
+            error_msg = f"No PowerPoint files found in folder {full_path} for chat_id {chat_id}."
+            print(error_msg)
+            # extraction_errors.append(error_msg) # No error if folder is just empty
+            return {
+                "projects": {}, "upcoming_events": {},
+                "metadata": {"processed_files": 0, "folder": chat_id, "errors": extraction_errors}, # errors list might be empty
+                "source_files": []
+            }
+        
+        current_aggregated_projects: Dict[str, Any] = {}
+        current_aggregated_events: Dict[str, List[str]] = {}
+
+        for filename in pptx_files:
+            file_path = os.path.join(full_path, filename)
+            print(f"Processing file for aggregation: {file_path}")
+            
+            try:
+                # extract_projects_from_presentation is from analist module
+                file_project_data = extract_projects_from_presentation(file_path) 
+                file_count += 1
+                
+                service_name_parts = os.path.basename(filename).replace('.pptx', '').split('_')
+                service_name = service_name_parts[-1] if len(service_name_parts) > 1 else service_name_parts[0]
+                
+                processed_file_info = {"filename": filename, "service_name": service_name, "processed": True}
+                
+                if "projects" in file_project_data and file_project_data["projects"]:
+                    project_count_in_file = len(file_project_data["projects"])
+                    processed_file_info["project_count"] = project_count_in_file
+                    # Basic merge: For a more robust solution, a deep merge function would be better
+                    for main_project_name, main_project_content in file_project_data["projects"].items():
+                        if main_project_name not in current_aggregated_projects:
+                            current_aggregated_projects[main_project_name] = main_project_content
+                        else: # Rudimentary merge for top-level project data
+                            if isinstance(main_project_content, dict) and isinstance(current_aggregated_projects[main_project_name], dict):
+                                for key in ["information", "critical", "small", "advancements"]:
+                                    if key in main_project_content:
+                                        if key == "information" and current_aggregated_projects[main_project_name].get(key) and main_project_content[key]:
+                                            current_aggregated_projects[main_project_name][key] += "\n" + main_project_content[key]
+                                        elif key == "information" and main_project_content[key]:
+                                             current_aggregated_projects[main_project_name][key] = main_project_content[key]
+                                        elif key != "information": # For lists like critical, small, advancements
+                                            current_aggregated_projects[main_project_name].setdefault(key, []).extend(
+                                                item for item in main_project_content[key] if item not in current_aggregated_projects[main_project_name].get(key,[])
+                                            )
+                else: # No projects found in this file
+                    error_detail = file_project_data.get("metadata", {}).get("error", f"No projects extracted from {filename}")
+                    print(f"Warning/Error in file {filename}: {error_detail}")
+                    # Only add to extraction_errors if it's a genuine error from the extractor
+                    if "error" in file_project_data.get("metadata", {}):
+                        extraction_errors.append(f"File {filename}: {error_detail}")
+                    processed_file_info["warning" if "error" not in file_project_data.get("metadata", {}) else "error"] = error_detail
+                
+                processed_files_metadata.append(processed_file_info)
+                
+                # Handle upcoming events from file's metadata
+                if "metadata" in file_project_data and "collected_upcoming_events" in file_project_data["metadata"]:
+                    events = file_project_data["metadata"]["collected_upcoming_events"]
+                    if events and isinstance(events, list):
+                        processed_file_info["events_count"] = len(events)
+                        current_aggregated_events.setdefault(service_name, []).extend(
+                            event for event in events if event not in current_aggregated_events.get(service_name, [])
+                        )
+                    else: 
+                        processed_file_info["events_count"] = 0
+            except Exception as e:
+                error_message = f"Exception processing file {filename}: {str(e)}"
+                print(error_message, exc_info=True)
+                extraction_errors.append(error_message)
+                processed_files_metadata.append({"filename": filename, "service_name": "Unknown", "processed": False, "error": str(e)})
+        
+        if file_count > 0 and not current_aggregated_projects and not current_aggregated_events:
+            msg = f"Warning: {file_count} files processed for chat {chat_id}, but no project data or events were aggregated."
+            print(msg)
+            # Not necessarily an error if files were empty/irrelevant
+        
+        if file_count == 0 and pptx_files: # Files existed but none could be processed
+            error_msg = f"No files were successfully processed in {full_path} for chat {chat_id}, though PPTX files were present."
+            print(error_msg)
+            extraction_errors.append(error_msg)
+            # Return early as there's nothing to summarize
+            return {"projects": {}, "upcoming_events": {}, "metadata": {"processed_files": 0, "folder": chat_id, "errors": extraction_errors}, "source_files": processed_files_metadata}
+
+        final_data_for_llm = {
+            "projects": current_aggregated_projects,
+            "upcoming_events": current_aggregated_events,
+            "metadata": {"processed_files": file_count, "folder": chat_id, "errors": extraction_errors},
+            "source_files": processed_files_metadata
+        }
+
+    # LLM Summarization Part (common for both paths if data exists)
     
-    # Remove upcoming_events from projects if it was accidentally included there
-    if "upcoming_events" in result["projects"]:
-        del result["projects"]["upcoming_events"]
-    
-    # Log the size and structure of the result
-    print(f"Final result structure: {len(result['projects'])} projects, {len(result['upcoming_events'])} services with events")
-    if not result["projects"]:
-        print("WARNING: No projects were extracted from any files")
-    
-    # Prepare the data to send to the LLM for summarization if needed
+    # Log structure before LLM
+    print(f"Data for LLM (chat {chat_id}): {len(final_data_for_llm.get('projects', {}))} projects, {len(final_data_for_llm.get('upcoming_events', {}))} services with events.")
+    if not final_data_for_llm.get("projects") and not final_data_for_llm.get("upcoming_events"):
+        print(f"Warning: No project data or upcoming events to send to LLM for chat {chat_id}. This might be intended if input was empty.")
+
     prompt_inputs = {
-        "project_data": json.dumps(result, indent=2, ensure_ascii=False),
+        "project_data": json.dumps(final_data_for_llm, indent=2, ensure_ascii=False),
         "temp_add_info": ""
     }
     if add_info:
         prompt_inputs["temp_add_info"] = f"Voici des informations supplémentaires qui peuvent être utiles pour la synthèse: {add_info}"
     
-    # Create a prompt template for the LLM
-    summarization_template = """
-    Tu es un assistant chargé de résumer des informations de projets et de les formater.
+    summarization_template = """    Tu es un assistant chargé de résumer des informations de projets et de les formater.
 
     Voici les données des projets:
     {project_data}
@@ -419,80 +296,92 @@ def aggregate_and_summarize(pptx_folder, add_info=None):
     Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
     """
     
-    # Generate the prompt using direct format method
     prompt = summarization_template.format(**prompt_inputs)
     
-    # Only try to use LLM if we have actual project data
-    if not result["projects"]:
-        print("Skipping LLM summarization because no project data was extracted")
-        return result
+    # Skip LLM if there's truly nothing to summarize (empty projects AND empty events)
+    if not final_data_for_llm.get("projects") and not final_data_for_llm.get("upcoming_events"):
+        print(f"Skipping LLM summarization for chat {chat_id} as no project or event data was found/aggregated.")
+        # Return the (likely empty) structure with its metadata
+        return final_data_for_llm 
     
-    # Call the LLM to generate the summary in JSON format
     try:
-        # Check prompt size to warn about potential issues
         prompt_size = len(prompt.encode('utf-8'))
-        print(f"Summarization prompt size: {prompt_size} bytes")
-        if prompt_size > 100000:  # 100KB threshold
-            print(f"WARNING: Large prompt detected ({prompt_size} bytes), LLM may timeout or fail")
-        
-        print("Calling LLM for summarization...")
+        print(f"Summarization prompt size: {prompt_size} bytes for chat {chat_id}")
+        # Adjusted warning thresholds
+        if prompt_size > 150000: 
+            print(f"WARNING: Very large prompt detected ({prompt_size} bytes) for chat {chat_id}, LLM may timeout or fail.")
+        elif prompt_size < 200 and not (final_data_for_llm.get("projects") or final_data_for_llm.get("upcoming_events")): # Very small prompt AND no actual data
+             print(f"Warning: Very small prompt size ({prompt_size} bytes) for chat {chat_id} and no project/event data. Likely empty input. Skipping LLM.")
+             return final_data_for_llm
+
+        print(f"Calling LLM for summarization for chat {chat_id}...")
         llm_response = summarize_model.invoke(prompt)
-        print("LLM response received successfully")
+        print(f"LLM response received successfully for chat {chat_id}")
         
-        # Extract the JSON part from the response
-        llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
-        json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+        llm_response_cleaned = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        # Attempt to find JSON block, otherwise assume the whole response is JSON
+        json_match = re.search(r'```json\s*(.*?)```', llm_response_cleaned, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
-            json_str = llm_response
+            json_str = llm_response_cleaned # Assume entire cleaned response is the JSON
         
-        # Clean the JSON string and parse it
         json_str = json_str.strip()
         summarized_result = json.loads(json_str)
         
-        print("LLM summarization completed successfully")
+        print(f"LLM summarization completed successfully for chat {chat_id}")
+
+        # Ensure original/current metadata and source_files are preserved or merged into LLM response
+        # The LLM should ideally return the full structure including "metadata" and "source_files".
+        # If it doesn't, we merge them back to ensure consistency.
+        if "metadata" not in summarized_result:
+            summarized_result["metadata"] = final_data_for_llm.get("metadata", {})
+        else: # Merge, giving precedence to original metadata if keys conflict, or update if LLM adds new info
+            original_meta = final_data_for_llm.get("metadata", {})
+            for k, v in original_meta.items():
+                summarized_result["metadata"].setdefault(k, v)
+        
+        if "source_files" not in summarized_result:
+            summarized_result["source_files"] = final_data_for_llm.get("source_files", [])
+            
         return summarized_result
         
+    except json.JSONDecodeError as json_e:
+        print(f"JSON Decode Error during LLM summarization for chat {chat_id}: {str(json_e)}")
+        print(f"LLM Response (cleaned) that caused error: '{json_str[:500]}...'")
+        final_data_for_llm.setdefault("metadata", {}).setdefault("errors", []).append(f"LLM JSON Decode Error: {str(json_e)}")
+        return final_data_for_llm # Return raw aggregated data
     except Exception as e:
-        print(f"Error during LLM summarization: {str(e)}")
-        print(f"Error type: {type(e).__name__}")
-        
-        # Check if it's a connection-related error
+        print(f"Error during LLM summarization for chat {chat_id}: {str(e)}", exc_info=True)
         if "EOF" in str(e) or "Connection" in str(e) or "timeout" in str(e).lower():
-            print("Connection error detected - likely Ollama service issue or timeout")
+            print("Connection error detected - likely Ollama service issue or timeout.")
         
-        # If summarization fails, return the raw aggregated data
-        print("Returning raw aggregated data as fallback")
-        return result
+        print(f"Returning raw aggregated data as fallback for chat {chat_id} due to LLM error.")
+        final_data_for_llm.setdefault("metadata", {}).setdefault("errors", []).append(f"LLM summarization failed: {str(e)}")
+        return final_data_for_llm
 
-def Generate_pptx_from_text(pptx_folder, info=None):
+def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp: Optional[str] = None) -> Dict[str, Any]: 
     """
     Generate a JSON structure from text input that can be used by update_table_with_project_data.
     Uses an LLM to process the text information and return it in the specified JSON format.
     
     Parameters:
-      pptx_folder (str): Path to the folder (used for compatibility, not used in processing).
-      info (str): Text information to process and structure into JSON format.
-    
+      chat_id (str): Identifier for the chat/conversation.
+      info (str, optional): Text information to process and structure into JSON format.
+      timestamp (str, optional): Timestamp, currently not used by this function but kept for signature consistency.
+
     Returns:
-      dict: A dictionary with activities containing project information and upcoming_events in the specified JSON format
+      dict: A dictionary with project data in the specified JSON format.
     """
-    # If no info is provided, return empty structure
     if not info:
         return {
             "projects": {},
             "upcoming_events": {},
-            "metadata": {
-                "processed_files": 0,
-                "folder": os.path.basename(pptx_folder)
-            },
+            "metadata": {"processed_files": 0, "folder": chat_id, "errors": ["No input text provided"]},
             "source_files": []
         }
     
-    # Create a prompt template for the LLM
-    summarization_template = """
-    Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
+    summarization_template = """    Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
 
     Voici les données textuelles à analyser:
     {text_data}
@@ -548,7 +437,7 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     }},
     "metadata":{{
         "processed_files": 1,
-        "folder":"Name of the folder"
+        "folder":"{chat_id_placeholder}" 
     }},
     "source_files":[
         {{
@@ -573,84 +462,109 @@ def Generate_pptx_from_text(pptx_folder, info=None):
     9. Ne pas inventer de nouvelles informations, uniquement celles qui sont déjà présentes dans le texte
     10. Si aucun projet spécifique n'est identifiable, crée au moins un projet "Général" avec les informations disponibles
     11. Si tu n'as pas d'information sur les projets n'ajoute rien dans le JSON
+    12. Remplace {chat_id_placeholder} par la valeur réelle de chat_id: {chat_id_value}
     """
     
-    # Format the prompt directly with f-string instead of using PromptTemplate
-    prompt = summarization_template.format(text_data=info)
+    prompt = summarization_template.format(text_data=info, chat_id_placeholder=chat_id, chat_id_value=chat_id)
     
-    # Call the LLM to generate the summary in JSON format
     try:
-        # Check prompt size to warn about potential issues
         prompt_size = len(prompt.encode('utf-8'))
-        print(f"Generate PPTX prompt size: {prompt_size} bytes")
-        if prompt_size > 100000:  # 100KB threshold
-            print(f"WARNING: Large prompt detected ({prompt_size} bytes), LLM may timeout or fail")
+        print(f"Generate PPTX from text prompt size: {prompt_size} bytes for chat {chat_id}")
+        if prompt_size > 120000: 
+            print(f"WARNING: Large prompt detected ({prompt_size} bytes) for chat {chat_id} for text generation, LLM may timeout/fail")
         
-        print("Calling LLM for PPTX generation...")
-        
-        # Add a small delay to prevent immediate consecutive LLM calls
-        time.sleep(1)  # 1 second delay
+        print(f"Calling LLM for PPTX generation from text for chat {chat_id}...")
+        time.sleep(1) 
         
         llm_response = summarize_model.invoke(prompt)
-        print("LLM response received successfully")
+        print(f"LLM response received successfully for PPTX generation from text for chat {chat_id}")
         
-        # Extract the JSON part from the response
-        llm_response = remove_tags_no_keep(llm_response, "<think>", "</think>")
-        json_match = re.search(r'```json\s*(.*?)```', llm_response, re.DOTALL)
+        llm_response_cleaned = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        json_match = re.search(r'```json\\s*(.*?)```', llm_response_cleaned, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
-            json_str = llm_response
+            json_str = llm_response_cleaned
         
-        # Clean the JSON string and parse it
         json_str = json_str.strip()
         result = json.loads(json_str)
-        print("result :", result)
-        print("result type :", type(result))
         
-        print("LLM PPTX generation completed successfully")
+        print(f"LLM PPTX generation from text completed successfully for chat {chat_id}")
+        # Ensure metadata is consistent
+        if "metadata" not in result: result["metadata"] = {}
+        result["metadata"]["folder"] = chat_id
+        result["metadata"].setdefault("processed_files", 1)
+        if "source_files" not in result: result["source_files"] = [{"filename":"generated_from_text", "service_name":"Text Generator", "processed":True, "events_count":0}]
+
         return result
         
+    except json.JSONDecodeError as json_e:
+        print(f"JSON Decode Error during LLM text generation for chat {chat_id}: {str(json_e)}")
+        print(f"LLM Response (cleaned) causing text gen error: '{json_str[:500]}...'")
+        return {
+            "projects": {"Erreur JSON": {"information": f"Erreur de décodage JSON: {str(json_e)}. Input: {info[:200]}", "critical": ["Erreur JSON"], "small": [], "advancements": []}},
+            "upcoming_events": {},
+            "metadata": {"processed_files": 1, "folder": chat_id, "error": f"LLM JSON Decode Error: {str(json_e)}"},
+            "source_files": [{"filename": "generated_from_text_with_json_error", "processed": False, "error": str(json_e)}]
+        }
     except Exception as e:
         error_str = str(e)
-        print(f"Error during LLM PPTX generation: {error_str}")
-        print(f"Error type: {type(e).__name__}")
-        
-        # Check if it's a connection-related error
+        print(f"Error during LLM PPTX generation from text for chat {chat_id}: {error_str}", exc_info=True)
         if any(keyword in error_str.lower() for keyword in ["eof", "connection", "timeout", "timed out"]):
-            print("Connection/timeout error detected during PPTX generation - likely Ollama service issue or timeout")
+            print("Connection/timeout error detected - likely Ollama service issue or timeout")
         elif "ollama" in error_str.lower():
-            print("Ollama service error detected during PPTX generation")
+            print("Ollama service error detected")
         
-        # If generation fails, return a basic structure with error info
-        print("Returning basic structure as fallback due to LLM error")
+        print(f"Returning basic structure as fallback for chat {chat_id} due to LLM text generation error")
         return {
             "projects": {
                 "Erreur de génération": {
-                    "information": f"Une erreur s'est produite lors de la génération automatique: {error_str}. Contenu original: {info[:500]}...",
-                    "critical": ["Erreur de génération LLM"],
+                    "information": f"Une erreur s'est produite lors de la génération automatique à partir du texte: {error_str}. Contenu original: {info[:500]}...",
+                    "critical": ["Erreur de génération LLM à partir du texte"],
                     "small": [],
                     "advancements": []
                 }
             },
             "upcoming_events": {},
-            "metadata": {
-                "processed_files": 1,
-                "folder": os.path.basename(pptx_folder),
-                "error": error_str
-            },
-            "source_files": [
-                {
-                    "filename": "generated_from_text_with_error",
-                    "service_name": "Text Generator",
-                    "processed": False,
-                    "error": error_str
-                }
-            ]
+            "metadata": {"processed_files": 1, "folder": chat_id, "error": error_str},
+            "source_files": [{"filename": "generated_from_text_with_error", "service_name": "Text Generator", "processed": False, "error": error_str}]
         }
 
 if __name__ == "__main__":
-    folder = "pptx_folder"  # Update with your actual folder path
-    result = aggregate_and_summarize(folder)
-    print("Activities:", result["activities"])
-    print("Upcoming Events:", result["upcoming_events"])
+    test_chat_id = "test_chat_extract_summarize"
+    dummy_chat_folder = os.path.join(UPLOAD_FOLDER, test_chat_id)
+    os.makedirs(dummy_chat_folder, exist_ok=True)
+    
+    # Create a dummy pptx file for testing the file processing path
+    # You would need the python-pptx library to create a real one: pip install python-pptx
+    # from pptx import Presentation
+    # prs = Presentation()
+    # prs.slides.add_slide(prs.slide_layouts[5])
+    # prs.save(os.path.join(dummy_chat_folder, f"test_file_for_{test_chat_id}.pptx"))
+
+    print(f"--- Testing aggregate_and_summarize with chat_id: {test_chat_id} ---")
+    print("\n--- Test Case 1: No raw_structure_data (will attempt to process files if any in dummy folder) ---")
+    result1 = aggregate_and_summarize(chat_id=test_chat_id, add_info="Test summary 1 for file processing")
+    print("Result 1 (summarized from files/empty):")
+    print(json.dumps(result1, indent=2, ensure_ascii=False))
+
+    print("\n--- Test Case 2: With raw_structure_data ---")
+    dummy_structure = {
+        "projects": {"CachedProject": {"information": "This is cached info.", "critical": ["Cached critical alert"], "small": [], "advancements": ["Cached advancement"]}},
+        "upcoming_events": {"CachedService": ["Cached upcoming event"]},
+        "metadata": {"processed_files": 1, "folder": test_chat_id, "errors": [], "source_files": [{"filename": "from_cache.pptx", "service_name":"CacheServ", "processed":True}]}, # Added source_files to dummy
+    }
+    result2 = aggregate_and_summarize(chat_id=test_chat_id, add_info="Test summary 2 using cache", raw_structure_data=dummy_structure)
+    print("Result 2 (summarized from raw_structure_data):")
+    print(json.dumps(result2, indent=2, ensure_ascii=False))
+
+    print("\n--- Testing Generate_pptx_from_text ---")
+    text_info_for_generation = "Le projet Phoenix est en bonne voie. Une alerte mineure concerne le budget. Prochain jalon: livraison beta la semaine prochaine."
+    result3 = Generate_pptx_from_text(chat_id=test_chat_id, info=text_info_for_generation)
+    print("Result 3 (generated from text):")
+    print(json.dumps(result3, indent=2, ensure_ascii=False))
+
+    # import shutil
+    # if os.path.exists(dummy_chat_folder):
+    #     shutil.rmtree(dummy_chat_folder)
+    #     print(f"\nCleaned up dummy folder: {dummy_chat_folder}")
