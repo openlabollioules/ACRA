@@ -26,12 +26,26 @@ def extract_common_and_upcoming_info(project_data):
     """
     Extract common information, upcoming work information, and alerts from project data.
     
+    This function processes the data extracted from PowerPoint presentations to:
+    1. Separate general information from upcoming events information
+    2. Categorize content into common information, advancements, small alerts, and critical alerts
+    3. Organize the information by project for easier access and display
+    
+    The function specifically looks for upcoming events by scanning for text patterns
+    like "Evénements de la semaine à venir" and categorizes the text accordingly.
+    
     Parameters:
       project_data (dict): Project data dictionary extracted from presentations.
     
     Returns:
-      dict: A dictionary containing common_info, upcoming_info, advancements, small_alerts, and critical_alerts
+      dict: A dictionary containing:
+        - common_info: General project information
+        - upcoming_info: Information about upcoming events
+        - advancements: Positive developments and progress
+        - small_alerts: Minor issues to watch
+        - critical_alerts: Major problems requiring attention
     """
+    # Initialize data structures to hold categorized information
     common_info = []
     upcoming_info = ""
     advancements = []
@@ -40,6 +54,7 @@ def extract_common_and_upcoming_info(project_data):
     
     # Extract common information from all projects
     for project_name, project_info in project_data.items():
+        # Skip metadata keys that aren't actual projects
         if project_name == "metadata" or project_name == "upcoming_events":
             continue
             
@@ -47,6 +62,7 @@ def extract_common_and_upcoming_info(project_data):
             info_text = project_info["information"]
             
             # Check if the information contains details about upcoming week
+            # Using regex to find "Evénements de la semaine à venir" and capture everything after it
             upcoming_week_match = re.search(r"Evénements de la semaine à venir(.*?)$", info_text, re.DOTALL)
             if upcoming_week_match:
                 # Split the information: before match goes to common_info, the match itself goes to upcoming_info
@@ -58,20 +74,24 @@ def extract_common_and_upcoming_info(project_data):
                 if upcoming_part:
                     upcoming_info += f"{project_name}: {upcoming_part}\n"
             else:
+                # If no upcoming events section is found, all text goes to common info
                 common_info.append(f"{project_name}: {info_text}")
         
         # Process alerts and store them in separate categories
         if "alerts" in project_info:
             alerts = project_info["alerts"]
             
+            # Process advancements (positive developments)
             if alerts.get("advancements"):
                 for advancement in alerts.get("advancements", []):
                     advancements.append(f"{project_name}: {advancement}")
             
+            # Process small alerts (minor issues)
             if alerts.get("small_alerts"):
                 for alert in alerts.get("small_alerts", []):
                     small_alerts.append(f"{project_name}: {alert}")
             
+            # Process critical alerts (major problems)
             if alerts.get("critical_alerts"):
                 for alert in alerts.get("critical_alerts", []):
                     critical_alerts.append(f"{project_name}: {alert}")
@@ -80,7 +100,7 @@ def extract_common_and_upcoming_info(project_data):
     if "upcoming_events" in project_data:
         upcoming_info += project_data["upcoming_events"]
     
-    # Prepare the result dictionary
+    # Prepare the result dictionary with default values for empty sections
     result = {
         "common_info": "\n\n".join(common_info),
         "upcoming_info": upcoming_info if upcoming_info else "Aucun événement particulier prévu pour la semaine à venir.",
@@ -95,6 +115,13 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
     """
     Aggregates information from PPTX files or uses provided raw structure, then summarizes using an LLM.
 
+    This function is a key component in the ACRA pipeline with two main paths:
+    1. Using provided raw_structure_data (if available) - skips file processing
+    2. Processing PPTX files from the chat_id's folder - extracts data from files
+
+    In both cases, it summarizes the aggregated data using an LLM and returns
+    a structured JSON with project information, upcoming events, and metadata.
+
     Parameters:
       chat_id (str): Identifier for the chat/conversation, used to locate files if raw_structure_data is not provided.
       add_info (str, optional): Additional information to include in the LLM summarization prompt.
@@ -104,37 +131,41 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
     Returns:
       dict: LLM-summarized project data in JSON format, or the raw aggregated data if summarization fails.
     """
+    # Initialize data structures to hold processing results
     final_data_for_llm: Dict[str, Any]
     extraction_errors: List[str] = []
     processed_files_metadata: List[Dict[str, Any]] = []
     file_count = 0
 
-    # Path 1: Use provided raw_structure_data if valid
+    # ===== PATH 1: USE PROVIDED RAW STRUCTURE DATA =====
+    # If valid raw_structure_data is provided, we'll use it directly and skip file processing
     if raw_structure_data and isinstance(raw_structure_data, dict) and \
        ("projects" in raw_structure_data or "upcoming_events" in raw_structure_data): # Check for essential data keys
         print(f"Using provided raw_structure_data for chat_id: {chat_id}")
-        final_data_for_llm = json.loads(json.dumps(raw_structure_data)) # Deep copy to avoid modifying the cache
+        # Create a deep copy to avoid modifying the cached structure
+        final_data_for_llm = json.loads(json.dumps(raw_structure_data)) 
 
-        # Ensure essential keys exist and populate metadata from the raw_structure_data
+        # Ensure essential keys exist in the structure
         if "projects" not in final_data_for_llm: final_data_for_llm["projects"] = {}
         if "upcoming_events" not in final_data_for_llm: final_data_for_llm["upcoming_events"] = {}
         
-        # Metadata handling from cache
+        # Extract and validate metadata from the cached structure
         cached_metadata = final_data_for_llm.get("metadata", {})
         file_count = cached_metadata.get("processed_files", 0)
+        
         # If processed_files count is zero or missing, try to infer from source_files
         if not file_count and "source_files" in final_data_for_llm and isinstance(final_data_for_llm["source_files"], list):
             file_count = len([sf for sf in final_data_for_llm["source_files"] if isinstance(sf, dict) and sf.get("processed")])
         
+        # Extract and validate source files metadata
         processed_files_metadata = final_data_for_llm.get("source_files", [])
-        # Ensure processed_files_metadata is a list of dicts
         if not isinstance(processed_files_metadata, list) or not all(isinstance(item, dict) for item in processed_files_metadata):
             print(f"Warning: 'source_files' in raw_structure_data for chat {chat_id} is not a list of dicts. Resetting.")
             processed_files_metadata = [] # Reset if format is incorrect
 
+        # Extract and validate error information
         extraction_errors = cached_metadata.get("errors", [])
         if not isinstance(extraction_errors, list): extraction_errors = []
-
 
         # Ensure the final metadata structure is consistent
         final_data_for_llm["metadata"] = {
@@ -144,16 +175,20 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
         }
         final_data_for_llm["source_files"] = processed_files_metadata
 
-    # Path 2: No valid raw_structure_data, process files from folder
+    # ===== PATH 2: PROCESS FILES FROM FOLDER =====
+    # If no valid raw_structure_data was provided, we need to process the PowerPoint files
     else:
+        # Log the reason for choosing this path
         if raw_structure_data: # It was provided but invalid
              print(f"Provided raw_structure_data for chat_id {chat_id} was invalid or empty. Processing files from folder.")
         else: # It was not provided at all
              print(f"No raw_structure_data provided for chat_id: {chat_id}. Processing files from folder.")
 
+        # Construct the full path to the folder containing the PowerPoint files
         full_path = os.path.join(UPLOAD_FOLDER, chat_id)
         print(f"Processing folder for file aggregation: {full_path}")
 
+        # Validate that the folder exists and is accessible
         if not os.path.exists(full_path) or not os.path.isdir(full_path):
             error_msg = f"Error: Folder {full_path} does not exist or is not a directory for chat_id {chat_id}."
             print(error_msg)
@@ -164,94 +199,114 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
                 "source_files": []
             }
         
+        # Get all PowerPoint files from the folder
         all_files_in_dir = os.listdir(full_path)
         pptx_files = [f for f in all_files_in_dir if f.lower().endswith(".pptx")]
         print(f"PPTX files found in {full_path}: {pptx_files}")
         
+        # Handle case where no PowerPoint files are found
         if not pptx_files:
             error_msg = f"No PowerPoint files found in folder {full_path} for chat_id {chat_id}."
             print(error_msg)
-            # extraction_errors.append(error_msg) # No error if folder is just empty
+            # We don't add to extraction_errors if the folder is just empty - this might be intended
             return {
                 "projects": {}, "upcoming_events": {},
-                "metadata": {"processed_files": 0, "folder": chat_id, "errors": extraction_errors}, # errors list might be empty
+                "metadata": {"processed_files": 0, "folder": chat_id, "errors": extraction_errors},
                 "source_files": []
             }
         
+        # Initialize structures to hold aggregated data from all files
         current_aggregated_projects: Dict[str, Any] = {}
         current_aggregated_events: Dict[str, List[str]] = {}
 
+        # Process each PowerPoint file
         for filename in pptx_files:
             file_path = os.path.join(full_path, filename)
             print(f"Processing file for aggregation: {file_path}")
             
             try:
-                # extract_projects_from_presentation is from analist module
+                # Extract project data from the PowerPoint file
                 file_project_data = extract_projects_from_presentation(file_path) 
                 file_count += 1
                 
+                # Extract service name from the filename (used for categorizing events)
                 service_name_parts = os.path.basename(filename).replace('.pptx', '').split('_')
                 service_name = service_name_parts[-1] if len(service_name_parts) > 1 else service_name_parts[0]
                 
+                # Initialize metadata for this processed file
                 processed_file_info = {"filename": filename, "service_name": service_name, "processed": True}
                 
+                # Merge project data if projects were found in the file
                 if "projects" in file_project_data and file_project_data["projects"]:
                     project_count_in_file = len(file_project_data["projects"])
                     processed_file_info["project_count"] = project_count_in_file
-                    # Basic merge: For a more robust solution, a deep merge function would be better
+                    
+                    # Merge each project from the file into the aggregated projects
                     for main_project_name, main_project_content in file_project_data["projects"].items():
                         if main_project_name not in current_aggregated_projects:
+                            # If this is a new project, add it directly
                             current_aggregated_projects[main_project_name] = main_project_content
-                        else: # Rudimentary merge for top-level project data
+                        else: 
+                            # If this project already exists, merge the new content with existing
                             if isinstance(main_project_content, dict) and isinstance(current_aggregated_projects[main_project_name], dict):
                                 for key in ["information", "critical", "small", "advancements"]:
                                     if key in main_project_content:
+                                        # Special handling for text information - append it
                                         if key == "information" and current_aggregated_projects[main_project_name].get(key) and main_project_content[key]:
                                             current_aggregated_projects[main_project_name][key] += "\n" + main_project_content[key]
                                         elif key == "information" and main_project_content[key]:
                                              current_aggregated_projects[main_project_name][key] = main_project_content[key]
-                                        elif key != "information": # For lists like critical, small, advancements
+                                        # For list types (critical, small, advancements), extend without duplicates
+                                        elif key != "information": 
                                             current_aggregated_projects[main_project_name].setdefault(key, []).extend(
                                                 item for item in main_project_content[key] if item not in current_aggregated_projects[main_project_name].get(key,[])
                                             )
-                else: # No projects found in this file
+                else: 
+                    # Handle case where no projects were found in this file
                     error_detail = file_project_data.get("metadata", {}).get("error", f"No projects extracted from {filename}")
                     print(f"Warning/Error in file {filename}: {error_detail}")
                     # Only add to extraction_errors if it's a genuine error from the extractor
                     if "error" in file_project_data.get("metadata", {}):
                         extraction_errors.append(f"File {filename}: {error_detail}")
+                    # Add warning or error to the file's metadata
                     processed_file_info["warning" if "error" not in file_project_data.get("metadata", {}) else "error"] = error_detail
                 
+                # Add this file's metadata to the list of processed files
                 processed_files_metadata.append(processed_file_info)
                 
-                # Handle upcoming events from file's metadata
+                # Process upcoming events from the file's metadata
                 if "metadata" in file_project_data and "collected_upcoming_events" in file_project_data["metadata"]:
                     events = file_project_data["metadata"]["collected_upcoming_events"]
                     if events and isinstance(events, list):
                         processed_file_info["events_count"] = len(events)
+                        # Add events to the aggregated events, organized by service name
                         current_aggregated_events.setdefault(service_name, []).extend(
                             event for event in events if event not in current_aggregated_events.get(service_name, [])
                         )
                     else: 
                         processed_file_info["events_count"] = 0
             except Exception as e:
+                # Handle exceptions during file processing
                 error_message = f"Exception processing file {filename}: {str(e)}"
                 print(error_message, exc_info=True)
                 extraction_errors.append(error_message)
                 processed_files_metadata.append({"filename": filename, "service_name": "Unknown", "processed": False, "error": str(e)})
         
+        # Log warning if files were processed but no data was extracted
         if file_count > 0 and not current_aggregated_projects and not current_aggregated_events:
             msg = f"Warning: {file_count} files processed for chat {chat_id}, but no project data or events were aggregated."
             print(msg)
             # Not necessarily an error if files were empty/irrelevant
         
-        if file_count == 0 and pptx_files: # Files existed but none could be processed
+        # Handle case where files existed but none could be processed
+        if file_count == 0 and pptx_files: 
             error_msg = f"No files were successfully processed in {full_path} for chat {chat_id}, though PPTX files were present."
             print(error_msg)
             extraction_errors.append(error_msg)
             # Return early as there's nothing to summarize
             return {"projects": {}, "upcoming_events": {}, "metadata": {"processed_files": 0, "folder": chat_id, "errors": extraction_errors}, "source_files": processed_files_metadata}
 
+        # Build the final data structure for the LLM
         final_data_for_llm = {
             "projects": current_aggregated_projects,
             "upcoming_events": current_aggregated_events,
@@ -259,20 +314,27 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
             "source_files": processed_files_metadata
         }
 
-    # LLM Summarization Part (common for both paths if data exists)
+    # ===== LLM SUMMARIZATION (COMMON FOR BOTH PATHS) =====
     
-    # Log structure before LLM
+    # Log the data structure before sending to LLM
     print(f"Data for LLM (chat {chat_id}): {len(final_data_for_llm.get('projects', {}))} projects, {len(final_data_for_llm.get('upcoming_events', {}))} services with events.")
     if not final_data_for_llm.get("projects") and not final_data_for_llm.get("upcoming_events"):
         print(f"Warning: No project data or upcoming events to send to LLM for chat {chat_id}. This might be intended if input was empty.")
 
+    # Create input data for the LLM prompt
     prompt_inputs = {
         "project_data": json.dumps(final_data_for_llm, indent=2, ensure_ascii=False),
         "temp_add_info": ""
     }
+    # Add optional additional information if provided
     if add_info:
         prompt_inputs["temp_add_info"] = f"Voici des informations supplémentaires qui peuvent être utiles pour la synthèse: {add_info}"
     
+    # The prompt template instructs the LLM to:
+    # 1. Analyze and summarize the project data
+    # 2. Keep the same structure but make information more concise
+    # 3. Categorize important information as advancements, small alerts, or critical alerts for color-coding
+    # 4. Only include explicit upcoming events, removing anything not clearly a future event
     summarization_template = """    Tu es un assistant chargé de résumer des informations de projets et de les formater.
 
     Voici les données des projets:
@@ -281,8 +343,9 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
     Analyse ces données et identifie les points clés pour chaque projet et sous-projet.
     Pour chaque entrée, tu peux conserver la structure mais synthétise les informations
     pour qu'elles soient plus concises tout en préservant les détails importants.
+    Il faut vraiment que la réponse finale soit concise.
     
-    IMPORTANT: Inclus TOUTES les informations dans le champ "information" de chaque projet. MAIS quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, COPIE-LA ÉGALEMENT dans la catégorie correspondante (critical, small, advancements) pour qu'elle puisse être colorée. Ainsi, le texte apparaîtra dans le champ information mais sera automatiquement coloré.
+    IMPORTANT: Quand tu identifies une information comme étant un avancement, une alerte mineure ou une alerte critique, COPIE-LA ÉGALEMENT dans la catégorie correspondante (critical, small, advancements) pour qu'elle puisse être colorée. Ainsi, le texte apparaîtra dans le champ information mais sera automatiquement coloré.
     
     CONCERNANT LES ÉVÉNEMENTS À VENIR: Ne conserve dans la section "upcoming_events" QUE les informations qui sont EXPLICITEMENT des événements futurs. Si un élément ne mentionne pas clairement un événement à venir, retire-le de cette section. Si aucun événement futur n'est clairement identifié, laisse la section "upcoming_events" VIDE avec un objet vide {{}}.
     
@@ -296,6 +359,7 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
     Réponds uniquement avec la structure JSON modifiée, sans texte d'introduction ni d'explication.
     """
     
+    # Format the complete prompt with our data
     prompt = summarization_template.format(**prompt_inputs)
     
     # Skip LLM if there's truly nothing to summarize (empty projects AND empty events)
@@ -305,57 +369,69 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
         return final_data_for_llm 
     
     try:
+        # Check the prompt size to prevent potential LLM timeout or failure
         prompt_size = len(prompt.encode('utf-8'))
         print(f"Summarization prompt size: {prompt_size} bytes for chat {chat_id}")
-        # Adjusted warning thresholds
+        
+        # Display appropriate warnings based on prompt size
         if prompt_size > 150000: 
             print(f"WARNING: Very large prompt detected ({prompt_size} bytes) for chat {chat_id}, LLM may timeout or fail.")
-        elif prompt_size < 200 and not (final_data_for_llm.get("projects") or final_data_for_llm.get("upcoming_events")): # Very small prompt AND no actual data
-             print(f"Warning: Very small prompt size ({prompt_size} bytes) for chat {chat_id} and no project/event data. Likely empty input. Skipping LLM.")
-             return final_data_for_llm
+        elif prompt_size < 200 and not (final_data_for_llm.get("projects") or final_data_for_llm.get("upcoming_events")): 
+            # Very small prompt AND no actual data - probably empty input
+            print(f"Warning: Very small prompt size ({prompt_size} bytes) for chat {chat_id} and no project/event data. Likely empty input. Skipping LLM.")
+            return final_data_for_llm
 
+        # Call the LLM to summarize the project data
         print(f"Calling LLM for summarization for chat {chat_id}...")
         llm_response = summarize_model.invoke(prompt)
         print(f"LLM response received successfully for chat {chat_id}")
         
+        # Clean up the response and extract the JSON content
         llm_response_cleaned = remove_tags_no_keep(llm_response, "<think>", "</think>")
-        # Attempt to find JSON block, otherwise assume the whole response is JSON
+        
+        # Try to find a JSON block, otherwise assume the whole response is JSON
         json_match = re.search(r'```json\s*(.*?)```', llm_response_cleaned, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
             json_str = llm_response_cleaned # Assume entire cleaned response is the JSON
         
+        # Parse the JSON response
         json_str = json_str.strip()
         summarized_result = json.loads(json_str)
         
         print(f"LLM summarization completed successfully for chat {chat_id}")
 
         # Ensure original/current metadata and source_files are preserved or merged into LLM response
-        # The LLM should ideally return the full structure including "metadata" and "source_files".
-        # If it doesn't, we merge them back to ensure consistency.
+        # The LLM should ideally return the full structure including "metadata" and "source_files"
+        # If it doesn't, we merge them back to ensure consistency
         if "metadata" not in summarized_result:
             summarized_result["metadata"] = final_data_for_llm.get("metadata", {})
-        else: # Merge, giving precedence to original metadata if keys conflict, or update if LLM adds new info
+        else: 
+            # Merge, giving precedence to original metadata if keys conflict, or update if LLM adds new info
             original_meta = final_data_for_llm.get("metadata", {})
             for k, v in original_meta.items():
                 summarized_result["metadata"].setdefault(k, v)
         
+        # Ensure source files data is preserved
         if "source_files" not in summarized_result:
             summarized_result["source_files"] = final_data_for_llm.get("source_files", [])
             
         return summarized_result
         
     except json.JSONDecodeError as json_e:
+        # If the LLM response isn't valid JSON, log the error and return the raw data
         print(f"JSON Decode Error during LLM summarization for chat {chat_id}: {str(json_e)}")
         print(f"LLM Response (cleaned) that caused error: '{json_str[:500]}...'")
         final_data_for_llm.setdefault("metadata", {}).setdefault("errors", []).append(f"LLM JSON Decode Error: {str(json_e)}")
-        return final_data_for_llm # Return raw aggregated data
+        return final_data_for_llm # Return raw aggregated data as fallback
     except Exception as e:
+        # Handle any other errors (connection issues, timeouts, etc.)
         print(f"Error during LLM summarization for chat {chat_id}: {str(e)}", exc_info=True)
         if "EOF" in str(e) or "Connection" in str(e) or "timeout" in str(e).lower():
             print("Connection error detected - likely Ollama service issue or timeout.")
         
+        # When LLM fails, fall back to the raw aggregated data
         print(f"Returning raw aggregated data as fallback for chat {chat_id} due to LLM error.")
         final_data_for_llm.setdefault("metadata", {}).setdefault("errors", []).append(f"LLM summarization failed: {str(e)}")
         return final_data_for_llm
@@ -363,7 +439,15 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
 def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp: Optional[str] = None) -> Dict[str, Any]: 
     """
     Generate a JSON structure from text input that can be used by update_table_with_project_data.
-    Uses an LLM to process the text information and return it in the specified JSON format.
+    
+    This function takes free-form text input and uses an LLM to:
+    1. Extract project names, descriptions, and categorize information
+    2. Identify critical alerts, minor alerts, and advancements
+    3. Detect upcoming events if explicitly mentioned
+    4. Format everything into a structured JSON that matches the format expected by the PowerPoint generation pipeline
+    
+    The key difference from aggregate_and_summarize is that this function works from text directly,
+    rather than from PowerPoint files. It's used for the /generate command in the ACRA system.
     
     Parameters:
       chat_id (str): Identifier for the chat/conversation.
@@ -371,8 +455,25 @@ def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp:
       timestamp (str, optional): Timestamp, currently not used by this function but kept for signature consistency.
 
     Returns:
-      dict: A dictionary with project data in the specified JSON format.
+      dict: A dictionary with project data in the specified JSON format with the following structure:
+            {
+                "projects": { 
+                    "project1": {
+                        "information": "...",
+                        "critical": [...],
+                        "small": [...],
+                        "advancements": [...]
+                    },
+                    ...
+                },
+                "upcoming_events": {...},
+                "metadata": {...},
+                "source_files": [...]
+            }
+            
+            If an error occurs, a minimal structure with error information is returned.
     """
+    # Handle empty input case
     if not info:
         return {
             "projects": {},
@@ -381,6 +482,8 @@ def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp:
             "source_files": []
         }
     
+    # This template instructs the LLM how to structure the text input into our desired JSON format
+    # It provides detailed guidelines for categorizing information and maintaining proper structure
     summarization_template = """    Tu es un assistant chargé d'analyser des informations textuelles sur des projets et de les formater dans un JSON spécifique.
 
     Voici les données textuelles à analyser:
@@ -465,42 +568,54 @@ def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp:
     12. Remplace {chat_id_placeholder} par la valeur réelle de chat_id: {chat_id_value}
     """
     
+    # Format the prompt with the user's input text and chat ID
     prompt = summarization_template.format(text_data=info, chat_id_placeholder=chat_id, chat_id_value=chat_id)
     
     try:
+        # Check prompt size to avoid potential LLM timeout issues
         prompt_size = len(prompt.encode('utf-8'))
         print(f"Generate PPTX from text prompt size: {prompt_size} bytes for chat {chat_id}")
         if prompt_size > 120000: 
             print(f"WARNING: Large prompt detected ({prompt_size} bytes) for chat {chat_id} for text generation, LLM may timeout/fail")
         
+        # Call the LLM to process the text input
         print(f"Calling LLM for PPTX generation from text for chat {chat_id}...")
-        time.sleep(1) 
+        time.sleep(1)  # Small delay to ensure consistent operation
         
+        # Invoke the LLM with our prompt
         llm_response = summarize_model.invoke(prompt)
         print(f"LLM response received successfully for PPTX generation from text for chat {chat_id}")
         
+        # Process the LLM response to extract the JSON content
         llm_response_cleaned = remove_tags_no_keep(llm_response, "<think>", "</think>")
+        # Look for JSON block in markdown format, otherwise use the whole response
         json_match = re.search(r'```json\\s*(.*?)```', llm_response_cleaned, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
             json_str = llm_response_cleaned
         
+        # Parse the JSON response
         json_str = json_str.strip()
         result = json.loads(json_str)
         
         print(f"LLM PPTX generation from text completed successfully for chat {chat_id}")
-        # Ensure metadata is consistent
+        
+        # Ensure the result has the expected structure by adding missing fields if needed
         if "metadata" not in result: result["metadata"] = {}
         result["metadata"]["folder"] = chat_id
         result["metadata"].setdefault("processed_files", 1)
-        if "source_files" not in result: result["source_files"] = [{"filename":"generated_from_text", "service_name":"Text Generator", "processed":True, "events_count":0}]
+        if "source_files" not in result: 
+            result["source_files"] = [{"filename":"generated_from_text", "service_name":"Text Generator", "processed":True, "events_count":0}]
 
         return result
         
     except json.JSONDecodeError as json_e:
+        # Handle JSON parsing errors from the LLM response
         print(f"JSON Decode Error during LLM text generation for chat {chat_id}: {str(json_e)}")
         print(f"LLM Response (cleaned) causing text gen error: '{json_str[:500]}...'")
+        
+        # Return a minimal structure with error information
         return {
             "projects": {"Erreur JSON": {"information": f"Erreur de décodage JSON: {str(json_e)}. Input: {info[:200]}", "critical": ["Erreur JSON"], "small": [], "advancements": []}},
             "upcoming_events": {},
@@ -508,13 +623,17 @@ def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp:
             "source_files": [{"filename": "generated_from_text_with_json_error", "processed": False, "error": str(json_e)}]
         }
     except Exception as e:
+        # Handle any other unexpected errors
         error_str = str(e)
         print(f"Error during LLM PPTX generation from text for chat {chat_id}: {error_str}", exc_info=True)
+        
+        # Provide more specific error information based on error type
         if any(keyword in error_str.lower() for keyword in ["eof", "connection", "timeout", "timed out"]):
             print("Connection/timeout error detected - likely Ollama service issue or timeout")
         elif "ollama" in error_str.lower():
             print("Ollama service error detected")
         
+        # Return a minimal structure with error information
         print(f"Returning basic structure as fallback for chat {chat_id} due to LLM text generation error")
         return {
             "projects": {
@@ -529,42 +648,3 @@ def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp:
             "metadata": {"processed_files": 1, "folder": chat_id, "error": error_str},
             "source_files": [{"filename": "generated_from_text_with_error", "service_name": "Text Generator", "processed": False, "error": error_str}]
         }
-
-if __name__ == "__main__":
-    test_chat_id = "test_chat_extract_summarize"
-    dummy_chat_folder = os.path.join(UPLOAD_FOLDER, test_chat_id)
-    os.makedirs(dummy_chat_folder, exist_ok=True)
-    
-    # Create a dummy pptx file for testing the file processing path
-    # You would need the python-pptx library to create a real one: pip install python-pptx
-    # from pptx import Presentation
-    # prs = Presentation()
-    # prs.slides.add_slide(prs.slide_layouts[5])
-    # prs.save(os.path.join(dummy_chat_folder, f"test_file_for_{test_chat_id}.pptx"))
-
-    print(f"--- Testing aggregate_and_summarize with chat_id: {test_chat_id} ---")
-    print("\n--- Test Case 1: No raw_structure_data (will attempt to process files if any in dummy folder) ---")
-    result1 = aggregate_and_summarize(chat_id=test_chat_id, add_info="Test summary 1 for file processing")
-    print("Result 1 (summarized from files/empty):")
-    print(json.dumps(result1, indent=2, ensure_ascii=False))
-
-    print("\n--- Test Case 2: With raw_structure_data ---")
-    dummy_structure = {
-        "projects": {"CachedProject": {"information": "This is cached info.", "critical": ["Cached critical alert"], "small": [], "advancements": ["Cached advancement"]}},
-        "upcoming_events": {"CachedService": ["Cached upcoming event"]},
-        "metadata": {"processed_files": 1, "folder": test_chat_id, "errors": [], "source_files": [{"filename": "from_cache.pptx", "service_name":"CacheServ", "processed":True}]}, # Added source_files to dummy
-    }
-    result2 = aggregate_and_summarize(chat_id=test_chat_id, add_info="Test summary 2 using cache", raw_structure_data=dummy_structure)
-    print("Result 2 (summarized from raw_structure_data):")
-    print(json.dumps(result2, indent=2, ensure_ascii=False))
-
-    print("\n--- Testing Generate_pptx_from_text ---")
-    text_info_for_generation = "Le projet Phoenix est en bonne voie. Une alerte mineure concerne le budget. Prochain jalon: livraison beta la semaine prochaine."
-    result3 = Generate_pptx_from_text(chat_id=test_chat_id, info=text_info_for_generation)
-    print("Result 3 (generated from text):")
-    print(json.dumps(result3, indent=2, ensure_ascii=False))
-
-    # import shutil
-    # if os.path.exists(dummy_chat_folder):
-    #     shutil.rmtree(dummy_chat_folder)
-    #     print(f"\nCleaned up dummy folder: {dummy_chat_folder}")

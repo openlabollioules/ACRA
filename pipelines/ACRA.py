@@ -36,6 +36,21 @@ MAPPINGS_FOLDER = acra_config.mappings_folder
 
 class Pipeline:
     def __init__(self):
+        """
+        Initialize the ACRA Pipeline.
+        
+        This constructor:
+        1. Sets up configuration and ensures required directories exist
+        2. Initializes the chat_id (empty initially, set during request processing)
+        3. Creates a FileManager instance for handling file operations
+        4. Creates a CommandHandler instance for processing commands
+        5. Validates required configuration (e.g., API keys)
+        
+        The pipeline is the main orchestrator for the ACRA system, handling:
+        - Chat management and conversation tracking
+        - File processing and PowerPoint generation
+        - Command handling and LLM interactions
+        """
         log.info("Initializing ACRA Pipeline")
         
         # Initialize configuration and ensure directories exist
@@ -95,7 +110,16 @@ class Pipeline:
         return upload_result
 
     def reset_conversation_state(self):
-        """Reset conversation-specific states"""
+        """
+        Reset conversation-specific state variables.
+        
+        This method is called when switching to a different conversation (chat_id).
+        It ensures that state from a previous conversation doesn't leak into the new one.
+        
+        State reset includes:
+        - CommandHandler state (cached structure, confirmation state, etc.)
+        - System prompt used for LLM context
+        """
         log.info(f"Resetting conversation state for chat_id: {self.chat_id}")
         self.command_handler.reset_state()
         self.system_prompt = ""
@@ -124,7 +148,22 @@ class Pipeline:
 
     def analyze_slide_structure(self):
         """
-        Analyze slide structure in a folder.
+        Analyze the structure of PowerPoint files in the current chat's folder.
+        
+        This method extracts information from PowerPoint files, including projects,
+        alerts, advancements, and upcoming events. It provides the core data
+        that powers the system's understanding of the files' content.
+        
+        The method can operate in two modes:
+        - API mode: Calls a remote endpoint to perform the analysis
+        - Direct mode: Calls the get_slide_structure function locally
+        
+        Returns:
+            dict: A structured representation of the PowerPoint content, including
+                 projects, alerts, advancements, and upcoming events
+        
+        Raises:
+            ValueError: If no chat_id is set
         """
         current_chat_id = self.file_manager.chat_id
         
@@ -383,18 +422,40 @@ class Pipeline:
         return result
 
     async def inlet(self, body: dict, user: dict) -> dict:
+        """
+        Process incoming requests and prepare the system for handling user messages.
+        
+        This method:
+        1. Extracts metadata from the request body
+        2. Handles chat_id management (switching between conversations)
+        3. Processes uploaded files, copying them to the appropriate folders
+        4. Analyzes file structure and builds the system prompt
+        5. Manages cleanup of old or orphaned conversations
+        
+        This is called before the pipe method to set up the context for processing.
+        
+        Args:
+            body (dict): Request body containing metadata and file information
+            user (dict): User information
+            
+        Returns:
+            dict: The processed body, potentially with added metadata
+        """
         log.info(f"Received body: {body}")
         metadata = body.get("metadata", {})
         log.info(f"Metadata: {metadata}")
         
+        # Get current chat_id from FileManager
         current_fm_chat_id = self.file_manager.chat_id
         log.info(f"Current state - Pipeline.chat_id: '{self.chat_id}', FileManager.chat_id: '{current_fm_chat_id}'")
         
+        # Extract chat_id from the request metadata
         new_chat_id_from_request = metadata.get("chat_id")
         
         if new_chat_id_from_request:
             log.info(f"Chat_id from request metadata: '{new_chat_id_from_request}'")
             
+            # Check if we're switching to a different chat
             if new_chat_id_from_request != current_fm_chat_id:
                 log.info(f"*** CHAT ID CHANGING *** from FileManager current '{current_fm_chat_id}' to new '{new_chat_id_from_request}'")
                 
@@ -404,12 +465,10 @@ class Pipeline:
                 # Update Pipeline's chat_id as well, though FileManager is the primary owner now.
                 self.chat_id = new_chat_id_from_request 
                 
-                # Reset pipeline states specific to a conversation
-                self.reset_conversation_state() # This now delegates to command_handler.reset_state()
+                # Reset conversation-specific states
+                self.reset_conversation_state()
                 
-                # Trigger cleanup of orphaned conversations (now that active chats might have changed)
-                # Consider if this should be done before or after setting new chat_id.
-                # Doing it after ensures the new chat_id is preserved.
+                # Clean up orphaned conversations now that active chats might have changed
                 self._cleanup_old_chat(old_chat_id=current_fm_chat_id, new_chat_id=new_chat_id_from_request)
 
             elif not current_fm_chat_id: # First time FileManager gets a chat_id
@@ -419,18 +478,23 @@ class Pipeline:
         else:
             log.warning("No chat_id found in request metadata!")
 
+        # Process files if they exist in the metadata
         files_metadata = metadata.get("files", [])
         if files_metadata:
-            self.command_handler.cached_structure = None # Reset cache in CommandHandler
+            # Reset cached structure when new files are received
+            self.command_handler.cached_structure = None
             
+            # Process each uploaded file
             for file_entry in files_metadata:
                 file_data = file_entry.get("file", {})
                 filename = file_data.get("filename", "N/A")
                 openwebui_file_id = file_data.get("id", "N/A") # This is OpenWebUI's internal file ID
 
-                openwebui_uploads_dir = acra_config.get("OPENWEBUI_UPLOADS", "open-webui/uploads") # From acra_config
+                # Construct path to the uploaded file in OpenWebUI's storage
+                openwebui_uploads_dir = acra_config.get("OPENWEBUI_UPLOADS", "open-webui/uploads")
                 source_path_in_openwebui_volume = os.path.join(openwebui_uploads_dir, f"{openwebui_file_id}_{filename}")
                 
+                # Handle case where file isn't found at expected path
                 if not os.path.exists(source_path_in_openwebui_volume):
                     log.error(f"Source file from OpenWebUI not found at: {source_path_in_openwebui_volume}")
                     # Try an alternative common path if the primary one fails
@@ -441,35 +505,42 @@ class Pipeline:
                 else:
                         log.error(f"Also not found at alternative: {alt_source_path}. Skipping file.")
                         continue
+                
+                # Copy the file to the conversation's upload folder
                 copied_file_path = self.file_manager.copy_uploaded_file(
                     source_path=source_path_in_openwebui_volume, 
                     filename=f"{openwebui_file_id}_{filename}"
                 )
                 
+                # Add mapping between local file path and OpenWebUI file ID
                 abs_copied_path = os.path.abspath(copied_file_path)
                 if abs_copied_path not in self.file_manager.file_id_mapping:
                     self.file_manager.file_id_mapping[abs_copied_path] = openwebui_file_id
                     log.info(f"Manually added mapping for copied file: {abs_copied_path} -> {openwebui_file_id}")
                 
-                service_name = model_manager.extract_service_name(filename) # Use model_manager
+                # Extract service name from filename
+                service_name = model_manager.extract_service_name(filename)
                 log.info(f"File {filename} (OpenWebUI ID: {openwebui_file_id}) identified as service: {service_name}")
-                
-            # Analyze structure using current chat_id from file_manager
+            
+            # Analyze structure of all files in the current chat's folder
             structure_response_data = self.analyze_slide_structure() 
             
+            # Handle response from structure analysis
             if isinstance(structure_response_data, dict) and "error" in structure_response_data:
-                display_response = f"Erreur lors de l'analyse de la structure: {structure_response_data['error']}"
+                display_response = f"Error analyzing structure: {structure_response_data['error']}"
                 self.command_handler.cached_structure = {"error": display_response} # Cache error state
             elif isinstance(structure_response_data, dict):
                 self.command_handler.cached_structure = structure_response_data # Cache in CommandHandler
                 display_response = self.command_handler._format_slide_data(structure_response_data) # Format for system prompt
             else: # Should not happen if analyze_slide_structure is consistent
-                display_response = "Erreur: Type de réponse inattendu de l'analyse de structure."
+                display_response = "Error: Unexpected response type from structure analysis."
                 self.command_handler.cached_structure = {"error": display_response}
 
-            self.system_prompt = f"# Voici les informations des fichiers PPTX toutes les informations sont importantes pour la compréhension du message de l\'utilisateur et les données sont triées : \n\n{display_response}\n\n# voici le message de l\'utilisateur : "
+            # Build system prompt with file analysis information
+            self.system_prompt = f"# Here is information from the PPTX files - all information is important for understanding the user's message and the data is organized: \n\n{display_response}\n\n# Here is the user's message: "
             
-            self.file_manager.save_file_mappings() # Save any new manual mappings for copied files
+            # Save file mappings for future reference
+            self.file_manager.save_file_mappings()
         
         return body
     
@@ -661,12 +732,27 @@ class Pipeline:
 
     def pipe(self, body: dict, user_message: str, model_id: str, messages: List[dict]) -> Generator[str, None, None]:
         """
-        Main pipeline processing method.
-        Handles commands via CommandHandler and streams LLM responses via ModelManager.
+        Main pipeline processing method that handles user messages and commands.
+        
+        This method:
+        1. Checks if the message is a confirmation response
+        2. Handles specific commands (/summarize, /structure, etc.)
+        3. Falls back to LLM interaction for regular messages
+        4. Streams responses back to the user
+        
+        Args:
+            body (dict): Request body containing metadata
+            user_message (str): The user's message
+            model_id (str): ID of the model to use
+            messages (List[dict]): Message history
+            
+        Yields:
+            str: Streaming response chunks formatted as SSE events
         """
         message_lower = user_message.lower()
         __event_emitter__ = body.get("__event_emitter__") 
 
+        # Step 1: Check if this is a confirmation response (yes/no)
         handled_by_confirmation, conf_response = self.command_handler.handle_confirmation(message_lower)
         if handled_by_confirmation:
             log.info(f"Request handled by confirmation: {conf_response}")
@@ -675,21 +761,28 @@ class Pipeline:
             self.command_handler.last_response = conf_response # Update CH's last_response
             return
 
-        # 2. Handle Specific Commands (delegated to CommandHandler)
+        # Step 2: Handle specific commands
         command_response_str = None
         if "/summarize" in message_lower:
+            # Handle summarize command - generates a PowerPoint summary of uploaded files
             command_response_str = self.command_handler.handle_summarize_command(user_message) 
         elif "/structure" in message_lower:
+            # Handle structure command - analyzes and displays the structure of uploaded files
             command_response_str = self.command_handler.handle_structure_command()
         elif "/generate" in message_lower:
+            # Handle generate command - creates a PowerPoint from text input
             command_response_str = self.command_handler.handle_generate_command(user_message)
         elif "/clear" in message_lower:
+            # Handle clear command - cleans up orphaned folders and files
             command_response_str = self.command_handler.handle_clear_command(user_message)
         elif "/merge" in message_lower:
+            # Handle merge command - combines multiple PowerPoint files
             command_response_str = self.command_handler.handle_merge_command()
         elif "/regroup" in message_lower: 
+            # Handle regroup command - reorganizes projects with similar topics
             command_response_str = self.command_handler.handle_regroup_command() 
         
+        # If a command was handled, return its response
         if command_response_str is not None:
             log.info(f"Command handled: {command_response_str[:200]}...") # Log truncated response
             if __event_emitter__: __event_emitter__({"type": "content", "content": command_response_str})
@@ -698,7 +791,7 @@ class Pipeline:
             self.command_handler.last_response = command_response_str
             return
 
-        # 3. Default LLM interaction if no command handled
+        # Step 3: Default LLM interaction if no command handled
         final_user_message_for_llm = user_message
         if not user_message.strip(): # If user sends empty message
             # Show available commands if no user message (or default greeting)
@@ -709,6 +802,7 @@ class Pipeline:
             self.command_handler.last_response = available_commands_response
             return
         
+        # Add the previous assistant response for context if available
         if self.command_handler.last_response:
              final_user_message_for_llm += f"\n\n*Previous assistant response for context:* {self.command_handler.last_response}"
         
@@ -716,6 +810,7 @@ class Pipeline:
         full_prompt_for_llm = self.system_prompt + "\n\n" + final_user_message_for_llm
         log.info(f"Streaming LLM response for prompt (truncated): {full_prompt_for_llm[:300]}...")
 
+        # Stream the LLM response
         cumulative_content = ""
         try:
             yield f"data: {json.dumps({'choices': [{'delta': {'role': 'assistant'}}]})}\n\n" # Start stream

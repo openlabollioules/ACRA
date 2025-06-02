@@ -44,22 +44,36 @@ class CommandHandler:
         self.last_response = None
     
     def get_available_commands(self) -> str:
-        """Get list of available commands"""
-        return """Les commandes sont les suivantes : 
+        """
+        Get a list of available commands with their descriptions.
+        
+        Returns:
+            str: Formatted string with available commands and descriptions
+        """
+        return """Available commands: 
 
-/summarize [instructions] --> Affiche les résumés existants et demande confirmation avant d'en générer un nouveau. Vous pouvez ajouter des instructions spécifiques après la commande pour guider le résumé.
-/structure --> Renvoie la structure des fichiers 
-/clear [IDs] --> Nettoie tous les dossiers orphelins et supprime les fichiers associés dans OpenWebUI (préserve la conversation actuelle et éventuellement d'autres IDs spécifiés)
-/generate --> Génère tout le pptx en fonction du texte ( /generate [Avancements de la semaine])
-/merge --> Fusionne tous les fichiers pptx envoyés
-/regroup --> Regroupe les informations des projets similaires ou liés"""
+/summarize [instructions] --> Displays existing summaries and asks for confirmation before generating a new one. You can add specific instructions after the command to guide the summary.
+/structure --> Returns the structure of the files 
+/clear [IDs] --> Cleans all orphaned folders and deletes associated files in OpenWebUI (preserves the current conversation and optionally specified IDs)
+/generate --> Generates a complete PowerPoint based on text (/generate [Weekly progress])
+/merge --> Merges all uploaded PowerPoint files
+/regroup --> Regroups information from similar or related projects"""
     
     def handle_confirmation(self, message: str) -> Tuple[bool, str]:
         """
-        Handle confirmation responses (yes/no).
+        Handle confirmation responses (yes/no) from the user.
         
+        This method is called when the system is waiting for a confirmation
+        response from the user, such as after asking if they want to generate
+        a new summary when summaries already exist.
+        
+        Args:
+            message (str): The user's response message
+            
         Returns:
             Tuple[bool, str]: (handled, response_message)
+                - handled: True if the confirmation was handled, False otherwise
+                - response_message: The response message if handled, empty string otherwise
         """
         if not self.waiting_for_confirmation:
             return False, ""
@@ -74,14 +88,28 @@ class CommandHandler:
             
         elif message_lower in ["no", "n", "non"]:
             self.waiting_for_confirmation = False
-            return True, "Génération de résumé annulée."
+            return True, "Summary generation canceled."
         
         # Reset if we get any other input
         self.waiting_for_confirmation = False
         return False, ""
     
     def handle_summarize_command(self, message: str) -> str:
-        """Handle /summarize command"""
+        """
+        Handle the /summarize command, which generates a summary PowerPoint from uploaded files.
+        
+        This method:
+        1. Extracts any additional information provided after the command
+        2. Checks for existing summaries
+        3. If summaries exist, asks for confirmation before generating a new one
+        4. If no summaries exist, proceeds directly to generation
+        
+        Args:
+            message (str): The user's message containing the /summarize command and optional additional info
+            
+        Returns:
+            str: Response message with either existing summaries, confirmation request, or generation result
+        """
         # Extract additional information after the command
         additional_info = None
         if " " in message:
@@ -93,7 +121,9 @@ class CommandHandler:
         existing_summaries = self.file_manager.get_existing_summaries()
         
         if existing_summaries:
+            # If there are existing summaries, show them and ask for confirmation before generating a new one
             response = "Voici les résumés existants pour cette conversation:\n\n"
+
             for filename, url in existing_summaries:
                 response += f"- {filename}: {url}\n"
             
@@ -196,7 +226,19 @@ class CommandHandler:
             return f"error: Exception generating summary PowerPoint - {str(e)}"
 
     def _execute_summarize(self, additional_info: Optional[str] = None) -> str:
-        """Execute the summarize operation, creating a new summary PPTX."""
+        """
+        Execute the summarization operation, generating a new summary PowerPoint.
+        
+        This method orchestrates the entire summarization pipeline, with two possible paths:
+        1. API path: Uses a remote API endpoint to generate the summary structure, then creates a PowerPoint locally
+        2. Non-API path: Uses core.summarize_ppt which handles both summarization and PowerPoint generation
+        
+        Args:
+            additional_info (str, optional): Additional context information to include in the summary
+            
+        Returns:
+            str: Response message with download URL or error information
+        """
         try:
             from core import summarize_ppt
             
@@ -210,6 +252,8 @@ class CommandHandler:
             generated_pptx_path: Optional[str] = None # To store the path of the generated PPTX
 
             if acra_config.get("USE_API"):
+                # === API-BASED WORKFLOW ===
+                # In this path, we use an API to generate the summary structure, then create the PowerPoint locally
                 log.info(f"Using API to get summarized structure for chat {chat_id}")
                 import requests
                 endpoint = f"acra/{chat_id}/summarize_structure"
@@ -220,22 +264,23 @@ class CommandHandler:
                     api_payload["add_info"] = additional_info
                 
                 url = f"{acra_config.get('API_URL')}/{endpoint}"
-                response = requests.post(url, json=api_payload) # Original uses POST with JSON payload
+                response = requests.post(url, json=api_payload)
                 
                 if response.status_code == 200:
-                    summarized_json_data = response.json() # Expecting JSON project structure
+                    summarized_json_data = response.json()
                     if "error" in summarized_json_data and summarized_json_data["error"]:
                         log.error(f"API summarization error for chat {chat_id}: {summarized_json_data['error']}")
                         return f"Erreur de l'API lors de la récupération de la structure résumée: {summarized_json_data['error']}"
                     
-                    if "projects" not in summarized_json_data: # Validate API response
+                    # Validate that the API returned a properly structured JSON response
+                    if "projects" not in summarized_json_data:
                         log.error(f"API response for chat {chat_id} missing 'projects' key. Response: {summarized_json_data}")
                         return f"Réponse invalide de l'API: la clé 'projects' est manquante."
 
-                    # Generate PPTX using the JSON data obtained from API
+                    # The API returned a valid project structure, now generate a PowerPoint from it
                     temp_pptx_path_or_error = self._generate_summary_powerpoint(summarized_json_data, timestamp)
                     
-                    if "error:" in temp_pptx_path_or_error.lower(): # _generate_summary_powerpoint signals error with "error:" prefix
+                    if "error:" in temp_pptx_path_or_error.lower():
                         log.error(f"Failed to generate summary PPTX from API data for chat {chat_id}: {temp_pptx_path_or_error}")
                         return f"Erreur lors de la création du fichier PowerPoint de résumé: {temp_pptx_path_or_error.split('error:', 1)[-1].strip()}"
                     generated_pptx_path = temp_pptx_path_or_error
@@ -243,15 +288,24 @@ class CommandHandler:
                     log.error(f"API call for summarized structure failed for chat {chat_id}: {response.status_code} - {response.text}")
                     return f"Erreur API ({response.status_code}) lors de la récupération de la structure résumée."
             
-            else: # Not using API
+            else:
+                # === DIRECT FUNCTION CALL WORKFLOW ===
+                # In this path, core.summarize_ppt handles both summarization and PowerPoint generation
                 log.info(f"Using direct call to summarize and generate PPTX for chat {chat_id}")
                 raw_input_structure_for_llm: Optional[Dict[str, Any]] = None
+                
+                # Use cached structure if available for more efficient processing
                 if self.cached_structure and isinstance(self.cached_structure, dict) and self.cached_structure.get("projects") is not None:
                     log.info(f"Using cached_structure for summarization for chat {chat_id}")
                     raw_input_structure_for_llm = self.cached_structure
                 else:
                     log.info(f"No valid cached_structure found for chat {chat_id}. Summarize will process files.")
                 
+                # Call core.summarize_ppt, which handles:
+                # 1. Processing files to extract data (if raw_structure_data is None)
+                # 2. Summarizing the data with an LLM
+                # 3. Generating a PowerPoint file from the summarized data
+                # Returns either {"filename": "...", "summary": "/path/to/file.pptx"} or {"error": "message", "summary": None}
                 result_from_core_summarize_ppt = summarize_ppt(
                     chat_id=chat_id, 
                     add_info=additional_info, 
@@ -272,11 +326,14 @@ class CommandHandler:
                 
                 # The path to the already generated PPTX is in the "summary" key
                 generated_pptx_path = result_from_core_summarize_ppt["summary"]
-            
+
+            # === COMMON WORKFLOW FOR BOTH PATHS ===
+            # At this point, we should have a valid PowerPoint file path in generated_pptx_path
             if not generated_pptx_path:
                 log.critical(f"Unexpectedly reached common logic with no generated_pptx_path for chat {chat_id}. This indicates a flaw in prior error trapping.")
                 return "Erreur critique: Le chemin du fichier PowerPoint n'a pas été obtenu et l'erreur n'a pas été interceptée plus tôt."
 
+            # Upload the generated PowerPoint file to OpenWebUI for user access
             upload_result = self.file_manager.upload_to_openwebui(generated_pptx_path)
             
             if "error" in upload_result:
@@ -284,9 +341,11 @@ class CommandHandler:
                 generated_filename = os.path.basename(generated_pptx_path) if generated_pptx_path else "inconnu"
                 return f"Résumé généré ({generated_filename}) mais erreur lors du téléchargement vers OpenWebUI: {upload_result['error']}"
             
+            # Build the success response message
             response_message_parts = []
             if self.system_prompt:
                 try:
+                    # Generate an introduction based on the system prompt if available
                     introduction = model_manager.generate_introduction(self.system_prompt)
                     response_message_parts.append(introduction)
                 except Exception as intro_e:
@@ -298,6 +357,7 @@ class CommandHandler:
             
             final_response = "\n\n".join(response_message_parts)
             
+            # Save the file mapping to maintain state across sessions
             self.file_manager.save_file_mappings()
             return final_response
             
@@ -307,7 +367,17 @@ class CommandHandler:
             return f"Erreur majeure lors de l'exécution du résumé: {str(e)}"
     
     def handle_structure_command(self) -> str:
-        """Handle /structure command"""
+        """
+        Handle the /structure command, which analyzes and displays the structure of uploaded files.
+        
+        This method:
+        1. Uses cached structure if available
+        2. Otherwise, calls get_slide_structure to analyze PowerPoint files
+        3. Formats the structure data into a human-readable format
+        
+        Returns:
+            str: Formatted structure data or error message
+        """
         try:
             if self.cached_structure is None:
                 # Import here to avoid circular imports
@@ -387,8 +457,23 @@ class CommandHandler:
                 if additional_ids:
                     preserve_ids.extend(additional_ids)
             
-            # Run cleanup
-            cleanup_result = cleanup_orphaned_folders()
+            if acra_config.get("USE_API"):
+                # Use API endpoint
+                import requests
+                endpoint = "acra/cleanup"
+                url = f"{acra_config.get('API_URL')}/{endpoint}"
+                
+                # Send preserved IDs to the API
+                payload = {"preserve_ids": preserve_ids}
+                response = requests.post(url, json=payload)
+                
+                if response.status_code != 200:
+                    return f"Erreur lors du nettoyage: API request failed with status {response.status_code}"
+                
+                cleanup_result = response.json()
+            else:
+                # Use direct function call
+                cleanup_result = cleanup_orphaned_folders(preserve_ids=preserve_ids)
             
             # Reset state
             self.reset_state()
@@ -403,13 +488,26 @@ class CommandHandler:
     def handle_merge_command(self) -> str:
         """Handle /merge command"""
         try:
-            # Import here to avoid circular imports
-            from services import merge_pptx
-            
-            output_merge = os.path.join(acra_config.output_folder, self.file_manager.chat_id, "merged")
-            input_merge = acra_config.get_conversation_upload_folder(self.file_manager.chat_id)
-            
-            merge_result = merge_pptx(input_merge, output_merge)
+            chat_id = self.file_manager.chat_id
+            if not chat_id:
+                return "Error: No chat ID is set. Cannot merge files."
+
+            if acra_config.get("USE_API"):
+                # Use API endpoint
+                import requests
+                endpoint = f"acra/merge/{chat_id}"
+                url = f"{acra_config.get('API_URL')}/{endpoint}"
+                response = requests.post(url)
+                merge_result = response.json() if response.status_code == 200 else {"error": f"API request failed with status {response.status_code}"}
+            else:
+                # Use direct function call
+                # Import here to avoid circular imports
+                from services import merge_pptx
+                
+                output_merge = os.path.join(acra_config.output_folder, chat_id, "merged")
+                input_merge = acra_config.get_conversation_upload_folder(chat_id)
+                
+                merge_result = merge_pptx(input_merge, output_merge)
             
             if "error" in merge_result:
                 return f"Erreur lors de la fusion des fichiers: {merge_result['error']}"
@@ -433,55 +531,118 @@ class CommandHandler:
     def handle_regroup_command(self) -> str:
         """Handle /regroup command"""
         try:
-            # Get structure data
-            if self.cached_structure is None:
-                from core import get_slide_structure
-                structure_result = get_slide_structure(self.file_manager.chat_id)
-                if "error" in structure_result:
-                    return f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
+            chat_id = self.file_manager.chat_id
+            if not chat_id:
+                return "Error: No chat ID is set. Cannot regroup projects."
+
+            # Prepare payload and structure data
+            cached_structure = None
+            if self.cached_structure is not None and isinstance(self.cached_structure, dict) and "projects" in self.cached_structure:
+                cached_structure = self.cached_structure
+
+            if acra_config.get("USE_API"):
+                # Use API endpoint
+                import requests
+                import json
+                
+                endpoint = f"acra/regroup/{chat_id}"
+                url = f"{acra_config.get('API_URL')}/{endpoint}"
+                
+                # Prepare the payload with cached structure if available
+                payload = {}
+                if cached_structure:
+                    payload["structure_data"] = cached_structure
+                
+                # Call the API
+                response = requests.post(url, json=payload)
+                if response.status_code != 200:
+                    return f"Erreur lors de la réorganisation des données: API request failed with status {response.status_code}"
+                
+                regroup_result = response.json()
+                
+                # Update cached structure if the API returns a new structure
+                if "structure" in regroup_result:
+                    self.cached_structure = regroup_result["structure"]
+                
+                # Handle file path from API response
+                result_path = regroup_result.get("path")
+                if not result_path:
+                    return "Les informations des projets ont été regroupées avec succès, mais le chemin du fichier n'a pas été trouvé."
+                
+                # Upload to OpenWebUI
+                upload_result = self.file_manager.upload_to_openwebui(result_path)
             else:
-                if isinstance(self.cached_structure, str):
+                # Use direct function approach - get structure data first
+                if cached_structure is None:
                     from core import get_slide_structure
-                    structure_result = get_slide_structure(self.file_manager.chat_id)
+                    structure_result = get_slide_structure(chat_id)
                     if "error" in structure_result:
                         return f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
                 else:
-                    structure_result = self.cached_structure
-            
-            if not isinstance(structure_result, dict) or "projects" not in structure_result:
-                return f"Erreur: structure de données invalide. Type: {type(structure_result)}"
-            
-            # Get project grouping suggestions from LLM
-            project_names = list(structure_result["projects"].keys())
-            grouping_response = model_manager.generate_project_grouping(project_names)
-            
-            try:
-                groups_to_merge = extract_json(grouping_response)
-                if not isinstance(groups_to_merge, list):
+                    if isinstance(cached_structure, str):
+                        from core import get_slide_structure
+                        structure_result = get_slide_structure(chat_id)
+                        if "error" in structure_result:
+                            return f"Erreur lors de l'analyse de la structure: {structure_result['error']}"
+                    else:
+                        structure_result = cached_structure
+                
+                if not isinstance(structure_result, dict) or "projects" not in structure_result:
+                    return f"Erreur: structure de données invalide. Type: {type(structure_result)}"
+                
+                # Get project grouping suggestions from LLM
+                project_names = list(structure_result["projects"].keys())
+                grouping_response = model_manager.generate_project_grouping(project_names)
+                
+                try:
+                    groups_to_merge = extract_json(grouping_response)
+                    if not isinstance(groups_to_merge, list):
+                        groups_to_merge = []
+                except:
+                    log.warning("Could not extract valid JSON from LLM response")
                     groups_to_merge = []
-            except:
-                log.warning("Could not extract valid JSON from LLM response")
-                groups_to_merge = []
+                
+                log.info(f"Groups to merge: {groups_to_merge}")
+                
+                # Process regrouping
+                new_structure = self._process_regrouping(structure_result, groups_to_merge)
+                
+                # Generate PowerPoint with regrouped data
+                result = self._generate_regrouped_powerpoint(new_structure)
+                
+                # Update cached structure
+                self.cached_structure = new_structure
+                
+                return result
             
-            log.info(f"Groups to merge: {groups_to_merge}")
+            # Common upload handling code for API path
+            if "error" in upload_result:
+                return f"Les informations des projets ont été regroupées avec succès, mais une erreur s'est produite lors de la génération du lien de téléchargement: {upload_result['error']}"
             
-            # Process regrouping
-            new_structure = self._process_regrouping(structure_result, groups_to_merge)
-            
-            # Generate PowerPoint with regrouped data
-            result = self._generate_regrouped_powerpoint(new_structure)
-            
-            # Update cached structure
-            self.cached_structure = new_structure
-            
-            return result
+            self.file_manager.save_file_mappings()
+            return f"Les informations des projets ont été regroupées avec succès.\n\n### URL de téléchargement:\n{upload_result.get('download_url', 'Non disponible')}"
             
         except Exception as e:
             log.error(f"Error handling regroup command: {str(e)}")
             return f"Erreur lors de la réorganisation des données: {str(e)}"
     
     def _format_slide_data(self, data: dict) -> str:
-        """Format slide structure data for display"""
+        """
+        Format slide structure data into a readable text format.
+        
+        This method processes the raw structure data from PowerPoint files into a
+        hierarchical, Markdown-formatted text display. It includes:
+        - Project hierarchies with proper indentation
+        - Icons to distinguish different levels of projects/subprojects
+        - Critical alerts, minor alerts, and advancements
+        - Upcoming events organized by service
+        
+        Args:
+            data (dict): Raw structure data from PowerPoint analysis
+            
+        Returns:
+            str: Markdown-formatted text representation of the structure
+        """
         if not data:
             return "Aucun fichier PPTX fourni."
         
@@ -494,9 +655,21 @@ class CommandHandler:
         upcoming_events = data.get("upcoming_events", {})
         
         def format_project_hierarchy(project_name, content, level=0):
+            """
+            Recursively format a project and its subprojects with proper indentation and styling.
+            
+            Args:
+                project_name (str): Name of the project
+                content (dict): Project content data
+                level (int): Indentation level (0 for top-level)
+                
+            Returns:
+                str: Formatted project text
+            """
             output = ""
             indent = "  " * level
             
+            # Format project name based on level
             if level == 0:
                 output += f"{indent}🔶 **{project_name}**\n"
             elif level == 1:
@@ -504,6 +677,7 @@ class CommandHandler:
             else:
                 output += f"{indent}📎 *{project_name}*\n"
             
+            # Add project information
             if "information" in content and content["information"]:
                 info_lines = content["information"].split('\n')
                 for line in info_lines:
@@ -511,24 +685,28 @@ class CommandHandler:
                         output += f"{indent}- {line}\n"
                 output += "\n"
             
+            # Add critical alerts
             if "critical" in content and content["critical"]:
                 output += f"{indent}- 🔴 **Alertes Critiques:**\n"
                 for alert in content["critical"]:
                     output += f"{indent}  - {alert}\n"
                 output += "\n"
             
+            # Add minor alerts
             if "small" in content and content["small"]:
                 output += f"{indent}- 🟡 **Alertes à surveiller:**\n"
                 for alert in content["small"]:
                     output += f"{indent}  - {alert}\n"
                 output += "\n"
             
+            # Add advancements
             if "advancements" in content and content["advancements"]:
                 output += f"{indent}- 🟢 **Avancements:**\n"
                 for advancement in content["advancements"]:
                     output += f"{indent}  - {advancement}\n"
                 output += "\n"
             
+            # Recursively process subprojects
             for key, value in content.items():
                 if isinstance(value, dict) and key not in ["information", "critical", "small", "advancements"]:
                     output += format_project_hierarchy(key, value, level + 1)
@@ -537,9 +715,11 @@ class CommandHandler:
         
         result = f"📊 **Synthèse globale de {processed_files} fichier(s) analysé(s)**\n\n"
         
+        # Add projects
         for project_name, project_content in projects.items():
             result += format_project_hierarchy(project_name, project_content)
         
+        # Add upcoming events
         if upcoming_events:
             result += "\n\n📅 **Événements à venir par service:**\n\n"
             for service, events in upcoming_events.items():
