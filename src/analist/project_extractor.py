@@ -1,4 +1,3 @@
-import os
 from pptx import Presentation
 import re
 import json
@@ -137,7 +136,7 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                         
                     cell_text = cell.text.strip() if hasattr(cell, 'text') else ""
                     print(f"Row {row_idx}, Column {col_idx}: Text length {len(cell_text)}")
-                    
+                        
                     # Vérifier si la cellule a du contenu
                     if hasattr(cell, 'text_frame'):
                         cell_data = {
@@ -178,6 +177,26 @@ def extract_table_data_from_slide(slide) -> List[Dict]:
                                 cell_data["paragraphs"].append(para_data)
                             
                         cell_data["text"] = cell_data["text"].strip()
+                        
+                        # For column 2 (upcoming events), verify it's really an upcoming event
+                        if col_idx == 2:
+                            # Check if the text contains indicators of future events
+                            text_lower = cell_data["text"].lower()
+                            event_indicators = [
+                                "événement", "evenement", "à venir", "a venir", "prochain", 
+                                "semaine prochaine", "mois prochain", "futur", "prévu", "prevu",
+                                "sera", "planning", "calendrier", "agenda", "rendez-vous", "rendez vous"
+                            ]
+                            
+                            is_upcoming_event = any(indicator in text_lower for indicator in event_indicators)
+                            
+                            if not is_upcoming_event and cell_data["text"]:
+                                print(f"Column 2 text doesn't appear to be an upcoming event: '{cell_data['text'][:30]}...'")
+                                # Add a flag to indicate this might not be an upcoming event
+                                cell_data["is_upcoming_event"] = False
+                            else:
+                                cell_data["is_upcoming_event"] = True
+                        
                         row_data.append(cell_data)
                         if cell_data["text"]:
                             has_content = True
@@ -248,25 +267,50 @@ def extract_projects_from_table_data(table_data: List[Dict], title: str) -> Dict
         }
         
         # Process project information from column 1
+        project_information = ""
+        
         for paragraph in project_info_cell.get("paragraphs", []):
-            raw_projects[full_project_name]["information"] += paragraph.get("text", "") + "\n"
+            # Track the original paragraph text
+            paragraph_text = paragraph.get("text", "")
+            
+            # Keep the full paragraph text for information field
+            # We'll also identify colored sections for alerts
+            project_information += paragraph_text + "\n"
             
             # Process runs to extract colored alerts
             for run in paragraph.get("runs", []):
+                run_text = run["text"]
+                
+                # Add text to appropriate category based on color
                 if run["color_type"] == "advancement":
-                    raw_projects[full_project_name]["advancements"].append(run["text"])
+                    if run_text not in raw_projects[full_project_name]["advancements"]:
+                        raw_projects[full_project_name]["advancements"].append(run_text)
                 elif run["color_type"] == "small_alert":
-                    raw_projects[full_project_name]["small"].append(run["text"])
+                    if run_text not in raw_projects[full_project_name]["small"]:
+                        raw_projects[full_project_name]["small"].append(run_text)
                 elif run["color_type"] == "critical_alert":
-                    raw_projects[full_project_name]["critical"].append(run["text"])
+                    if run_text not in raw_projects[full_project_name]["critical"]:
+                        raw_projects[full_project_name]["critical"].append(run_text)
         
-        # Clean up information text
-        raw_projects[full_project_name]["information"] = raw_projects[full_project_name]["information"].strip()
+        # Set the information text
+        raw_projects[full_project_name]["information"] = project_information.strip()
         
         # Process upcoming events from column 2 - collect them pour les remonter au niveau supérieur
         events_text = events_cell.get("text", "").strip()
-        if events_text and events_text not in collected_upcoming_events:
+        
+        # Only add to upcoming events if it's verified as an actual upcoming event
+        is_upcoming_event = events_cell.get("is_upcoming_event", True)  # Default to True for backward compatibility
+        
+        if events_text and is_upcoming_event and events_text not in collected_upcoming_events:
+            print(f"Adding verified upcoming event: {events_text[:30]}...")
             collected_upcoming_events.append(events_text)
+        elif events_text and not is_upcoming_event:
+            print(f"Skipping text that's not an upcoming event: {events_text[:30]}...")
+            # Instead of adding to upcoming events, we could add it to general information
+            if raw_projects[full_project_name]["information"]:
+                raw_projects[full_project_name]["information"] += "\n" + events_text
+            else:
+                raw_projects[full_project_name]["information"] = events_text
     
     # Function to extract hierarchy from project name
     def extract_hierarchy(name):

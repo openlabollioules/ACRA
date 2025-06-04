@@ -1,11 +1,12 @@
 services:
   openwebui:
+    profiles:
+      - noapi
     image: ghcr.io/open-webui/open-webui:main
     ports:
       - "3030:8080"
     environment:
       OPENAI_API_URL: "http://pipelines:9099"
-
     volumes:
       - ./open-webui:/app/backend/data 
     depends_on:
@@ -13,39 +14,88 @@ services:
     networks:
       - webui-net
 
+  openwebui-api:
+    profiles:
+      - api
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3030:8080"
+    environment:
+      OPENAI_API_URL: "http://pipelines-api:9099"
+    volumes:
+      - ./open-webui:/app/backend/data 
+    depends_on:
+      - pipelines-api
+    networks:
+      - webui-net
+
   pipelines:
-    image: ghcr.io/open-webui/pipelines:main
+      profiles:
+        - noapi
+      build:
+        context: .
+        dockerfile: Dockerfile.pipelines
+      image: openwebui/pipelines-node:latest   
+      ports:
+        - "9099:9099"
+      volumes:
+        - ./pipelines:/app/pipelines
+        - ./open-webui/uploads:/app/uploads
+        - ./open-webui/webui.db:/app/webui.db
+        - ./pptx_folder:/app/pptx_folder
+        - ./templates:/app/templates
+        - ./OUTPUT:/app/OUTPUT
+        - ./mappings:/app/mappings
+        - ./src:/app/src
+        - ./.env:/app/.env
+      environment:
+        - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt
+        - MAPPINGS_FOLDER=/app/mappings
+        - OLLAMA_HOST=host.docker.internal
+        - USE_API=False
+      networks:
+        - webui-net
+  
+  pipelines-api:
+    profiles:
+      - api
+    build:
+      context: .
+      dockerfile: Dockerfile.pipelines
+    image: openwebui/pipelines-node:latest
     ports:
       - "9099:9099"
     volumes:
       - ./pipelines:/app/pipelines
-      - ./open-webui/uploads:/app/uploads # get the uploaded files
+      - ./open-webui/uploads:/app/uploads
       - ./open-webui/webui.db:/app/webui.db
       - ./pptx_folder:/app/pptx_folder
       - ./templates:/app/templates
       - ./OUTPUT:/app/OUTPUT
+      - ./mappings:/app/mappings
       - ./src:/app/src
-      - ./OUTPUT:/app/OUTPUT
+      - ./.env:/app/.env
     environment:
-      # - API_URL=http://host.docker.internal:5050 # API URL 
       - PIPELINES_REQUIREMENTS_PATH=/app/pipelines/requirements.txt
-      
+      - MAPPINGS_FOLDER=/app/mappings
+      - OLLAMA_HOST=host.docker.internal
+      - USE_API=True
     networks:
       - webui-net
-  
+        
   fastapi:
     profiles:
       - api
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile
     container_name: fastapi_app
     ports:
       - "5050:5050"
     volumes:
       - .:/app  
     depends_on:
-      - pipelines
+      - pipelines-api
     networks:
       - webui-net
 
