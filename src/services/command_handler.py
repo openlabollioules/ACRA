@@ -256,34 +256,27 @@ class CommandHandler:
                 # In this path, we use an API to generate the summary structure, then create the PowerPoint locally
                 log.info(f"Using API to get summarized structure for chat {chat_id}")
                 import requests
-                endpoint = f"acra/{chat_id}/summarize_structure"
+                endpoint = f"acra/{chat_id}"
                 
-                # Prepare JSON payload for the API
-                api_payload = {"timestamp": timestamp}
                 if additional_info: 
-                    api_payload["add_info"] = additional_info
+                    endpoint += f"?add_info={additional_info}"
                 
                 url = f"{acra_config.get('API_URL')}/{endpoint}"
-                response = requests.post(url, json=api_payload)
+                response = requests.get(url)
                 
                 if response.status_code == 200:
                     summarized_json_data = response.json()
                     if "error" in summarized_json_data and summarized_json_data["error"]:
                         log.error(f"API summarization error for chat {chat_id}: {summarized_json_data['error']}")
                         return f"Erreur de l'API lors de la récupération de la structure résumée: {summarized_json_data['error']}"
-                    
-                    # Validate that the API returned a properly structured JSON response
-                    if "projects" not in summarized_json_data:
-                        log.error(f"API response for chat {chat_id} missing 'projects' key. Response: {summarized_json_data}")
-                        return f"Réponse invalide de l'API: la clé 'projects' est manquante."
 
-                    # The API returned a valid project structure, now generate a PowerPoint from it
-                    temp_pptx_path_or_error = self._generate_summary_powerpoint(summarized_json_data, timestamp)
-                    
-                    if "error:" in temp_pptx_path_or_error.lower():
-                        log.error(f"Failed to generate summary PPTX from API data for chat {chat_id}: {temp_pptx_path_or_error}")
-                        return f"Erreur lors de la création du fichier PowerPoint de résumé: {temp_pptx_path_or_error.split('error:', 1)[-1].strip()}"
-                    generated_pptx_path = temp_pptx_path_or_error
+                    if "summary" not in summarized_json_data:
+                        log.error(f"summarize_ppt didn't return a 'summary' key with file path: {summarized_json_data}")
+                        return "Erreur: Le service de résumé n'a pas fourni le chemin du fichier généré."
+                
+                    # The path to the already generated PPTX is in the "summary" key
+                    generated_pptx_path = summarized_json_data["summary"]
+
                 else:
                     log.error(f"API call for summarized structure failed for chat {chat_id}: {response.status_code} - {response.text}")
                     return f"Erreur API ({response.status_code}) lors de la récupération de la structure résumée."

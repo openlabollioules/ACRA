@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pptx_folder")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "OUTPUT")
 
-@app.get("/acra/{folder_name}?add_info={add_info}")
+@app.get("/acra/{folder_name}")
 async def summarize(folder_name: str, add_info: str = None):
     """
     Summarizes the content of PowerPoint files in a folder and updates a template PowerPoint file with the summary.
@@ -173,18 +173,24 @@ async def merge_files(chat_id: str):
         input_dir = os.path.join(UPLOAD_FOLDER, chat_id)
         output_dir = os.path.join(OUTPUT_FOLDER, chat_id, "merged")
         os.makedirs(output_dir, exist_ok=True)
+
+        logger.info("Merging launched, waiting for results ...")
         
         # Merge the files
         result = merge_pptx(input_dir, output_dir)
+
+        logger.info("Merge done.")
         
         if "error" in result:
+            logger.error(f"Error while processing the merge : {result.get('error', '')}")
             raise HTTPException(status_code=500, detail=result["error"])
             
         return result
     except HTTPException as he:
+        logger.error(f"Error during merge : {str(he)}")
         raise he
     except Exception as e:
-        print(f"Error merging files: {str(e)}")
+        logger.error(f"Error merging files: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Merge error: {str(e)}")
 
 # Endpoint for regrouping project information
