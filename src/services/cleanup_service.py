@@ -111,7 +111,7 @@ def get_chat_ids_from_db() -> Set[str]:
         
         conn.close()
     except Exception as e:
-        logger.error(f"Error accessing database: {str(e)}", exc_info=True)
+        logger.error(f"Error accessing database: {str(e)}")
     
     return chat_ids
 
@@ -380,7 +380,7 @@ def verify_chat_is_orphaned(folder_id: str, chat_ids: Set[str]) -> bool:
         return True
         
     except Exception as e:
-        logger.error(f"Error during chat verification: {str(e)}", exc_info=True)
+        logger.error(f"Error during chat verification: {str(e)}")
         return False  # If verification fails, assume it's not orphaned for safety
 
 def cleanup_orphaned_folders():

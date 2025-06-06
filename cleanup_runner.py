@@ -36,7 +36,7 @@ if __name__ == "__main__":
         logger.info(f"Cleanup results: {result}")
         
     except Exception as e:
-        logger.error(f"Cleanup process failed: {str(e)}", exc_info=True)
+        logger.error(f"Cleanup process failed: {str(e)}")
         sys.exit(1)
     
     logger.info("Cleanup process finished")

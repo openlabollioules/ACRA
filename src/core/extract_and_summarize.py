@@ -288,7 +288,7 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
             except Exception as e:
                 # Handle exceptions during file processing
                 error_message = f"Exception processing file {filename}: {str(e)}"
-                print(error_message, exc_info=True)
+                print(error_message)
                 extraction_errors.append(error_message)
                 processed_files_metadata.append({"filename": filename, "service_name": "Unknown", "processed": False, "error": str(e)})
         
@@ -427,7 +427,7 @@ def aggregate_and_summarize(chat_id: str, add_info: Optional[str] = None, timest
         return final_data_for_llm # Return raw aggregated data as fallback
     except Exception as e:
         # Handle any other errors (connection issues, timeouts, etc.)
-        print(f"Error during LLM summarization for chat {chat_id}: {str(e)}", exc_info=True)
+        print(f"Error during LLM summarization for chat {chat_id}: {str(e)}")
         if "EOF" in str(e) or "Connection" in str(e) or "timeout" in str(e).lower():
             print("Connection error detected - likely Ollama service issue or timeout.")
         
@@ -625,7 +625,7 @@ def Generate_pptx_from_text(chat_id: str, info: Optional[str] = None, timestamp:
     except Exception as e:
         # Handle any other unexpected errors
         error_str = str(e)
-        print(f"Error during LLM PPTX generation from text for chat {chat_id}: {error_str}", exc_info=True)
+        print(f"Error during LLM PPTX generation from text for chat {chat_id}: {error_str}")
         
         # Provide more specific error information based on error type
         if any(keyword in error_str.lower() for keyword in ["eof", "connection", "timeout", "timed out"]):
