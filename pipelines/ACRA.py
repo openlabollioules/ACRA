@@ -829,7 +829,7 @@ class Pipeline:
 
         except Exception as e:
             error_message = f"Erreur lors du streaming de la réponse LLM: {str(e)}"
-            log.error(error_message, exc_info=True)
+            log.error(error_message)
             if __event_emitter__: __event_emitter__({"type": "error", "error": error_message})
             yield f"data: {json.dumps({'error': error_message})}\n\n"
             yield f"data: [DONE]\n\n"

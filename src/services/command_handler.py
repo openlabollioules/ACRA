@@ -219,7 +219,7 @@ class CommandHandler:
             return final_pptx_path # Should be the same as output_filepath if successful
 
         except Exception as e:
-            log.error(f"Error in _generate_summary_powerpoint: {str(e)}", exc_info=True)
+            log.error(f"Error in _generate_summary_powerpoint: {str(e)}")
             if os.path.exists(temp_filepath):
                 try: os.remove(temp_filepath) # Clean up temp file on error
                 except: pass
@@ -356,7 +356,7 @@ class CommandHandler:
             
         except Exception as e:
             current_chat_id = self.file_manager.chat_id if hasattr(self, 'file_manager') and self.file_manager and self.file_manager.chat_id else "UNKNOWN_CHAT_ID"
-            log.error(f"Exception in _execute_summarize for chat {current_chat_id}: {str(e)}", exc_info=True)
+            log.error(f"Exception in _execute_summarize for chat {current_chat_id}: {str(e)}")
             return f"Erreur majeure lors de l'exécution du résumé: {str(e)}"
     
     def handle_structure_command(self) -> str:
